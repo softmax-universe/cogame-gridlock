@@ -1,4 +1,4 @@
-# CI for a Coworld game repo (Metta-AI/cogame-gridlock).
+# CI for a Coworld game repo (softmax-universe/cogame-gridlock).
 #
 # Goes to:  .github/workflows/ci.yml  in the coworld repo.
 # Substitute: gridlock  (lowercase game slug, e.g. bullwhip)

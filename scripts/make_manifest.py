@@ -10,7 +10,7 @@ edit the docs, then re-run this:
 import collections
 import json
 
-SRC = "https://github.com/Metta-AI/cogame-gridlock/tree/main"
+SRC = "https://github.com/softmax-universe/cogame-gridlock/tree/main"
 
 readme = open("README.md").read()
 rules = open("docs/RULES.md").read()
@@ -146,7 +146,7 @@ variant_players = [{"name": n} for n in
                    ["Carbon Line", "Oxygen Line", "Germanium Line", "Silicon Line"]]
 
 manifest = collections.OrderedDict()
-manifest["$schema"] = "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json"
+manifest["$schema"] = "https://raw.githubusercontent.com/softmax-universe/coworld/main/src/coworld/coworld_manifest_schema.json"
 manifest["tags"] = ["logistics", "traffic", "commons", "real-time", "congestion"]
 manifest["episode_timeout_minutes"] = 20
 manifest["game"] = collections.OrderedDict([
