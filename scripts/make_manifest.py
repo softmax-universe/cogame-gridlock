@@ -10,7 +10,7 @@ edit the docs, then re-run this:
 import collections
 import json
 
-SRC = "https://github.com/Metta-AI/cogame-gridlock/tree/main"
+SRC = "https://github.com/softmax-universe/cogame-gridlock/tree/main"
 
 readme = open("README.md").read()
 rules = open("docs/RULES.md").read()
