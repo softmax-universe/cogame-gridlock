@@ -62,7 +62,7 @@ suite "results document":
     check results["total_delivered"].getInt() == total
     check total > 0
 
-  test "a fault gives four zeros and a null winner":
+  test "a fault leaves all scores null and winner null":
     var game = newTestSim(480, 5)
     runScripted(game, allKinds(skDispatcher))
     game.finished = false
@@ -72,11 +72,22 @@ suite "results document":
     check results["end_rule"].getStr() == "sim_fault"
     check results["winner"].kind == JNull
     for seat in 0 ..< Seats:
-      check results["scores"][seat].getFloat() == 0.0
+      check results["scores"][seat].kind == JNull
+      check not results["win"][seat].getBool()
       check results["delivered"][seat].getInt() == 0
     check results["total_delivered"].getInt() == 0
 
-  test "a deadline cut mid-episode scores the counters as they stand":
+  test "a deadline cut before turn 0 or mid-episode does not settle numeric scores":
+    var early = newTestSim(1920, 11)
+    endEpisode(early, "deadline", "wall_clock")
+    let earlyResults = resultsJson(early)
+    check earlyResults["reason"].getStr() == "deadline"
+    check earlyResults["end_rule"].getStr() == "wall_clock"
+    check earlyResults["winner"].kind == JNull
+    for seat in 0 ..< Seats:
+      check earlyResults["scores"][seat].kind == JNull
+      check not earlyResults["win"][seat].getBool()
+
     var game = newTestSim(1920, 11)
     var kinds = allKinds(skDispatcher)
     ## Stop after two turns, exactly as the engine's wall-clock stop does.
@@ -87,7 +98,10 @@ suite "results document":
     let results = resultsJson(game)
     check results["reason"].getStr() == "deadline"
     check results["end_rule"].getStr() == "wall_clock"
+    check results["winner"].kind == JNull
     for seat in 0 ..< Seats:
+      check results["scores"][seat].kind == JNull
+      check not results["win"][seat].getBool()
       check results["delivered"][seat].getInt() == standing[seat]
     check results["final_tick"].getInt() == game.tick
     check game.tick < game.config.episodeTicks

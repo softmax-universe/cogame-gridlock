@@ -119,13 +119,13 @@ win[s]   = delivered[s] == max(delivered) and that maximum is unique
 | `reason` | `end_rule` | when |
 |---|---|---|
 | `complete` | `full_time` | all 4800 ticks simulated — the normal ending |
-| `deadline` | `wall_clock` | the 660 s engine budget elapsed first; the counters are scored as they stand and the replay is complete and self-consistent up to the stop tick |
-| `fault` | `sim_fault` | an invariant guard tripped: two vans in one cell, a van off-graph, a delivered counter that decreased, a backlog over the cap. All scores 0, `winner: null` |
-| `fault` | `host_error` | an unexpected server-side exception, same treatment |
+| `deadline` | `wall_clock` | the 660 s engine budget elapsed before full time; episode terminates unscored (`scores` all `null`, `winner: null`) without public results or replay |
+| `fault` | `sim_fault` | an invariant guard tripped: two vans in one cell, a van off-graph, a delivered counter that decreased, a backlog over the cap; episode terminates unscored (`scores` all `null`, `winner: null`) |
+| `fault` | `host_error` | an absent/disconnected seat, rejected player decision, or server-side failure; episode terminates unscored (`scores` all `null`, `winner: null`) without substituting a scripted move |
 
-No other value may appear. A seat that never connects does **not** end the episode: its fleet is
-driven by the `dispatcher` baseline for the whole match, the no-show is reported to
-`COGAME_PLAYER_FAILURE_URI`, and the match plays to full time.
+No other value may appear. Every seat must connect and register explicitly before gameplay starts.
+An absent, unregistered, or disconnected seat is reported to `COGAME_PLAYER_FAILURE_URI` and
+terminates the episode unscored rather than being substituted with `dispatcher`.
 
 ## Determinism
 

@@ -476,15 +476,16 @@ proc endEpisode*(sim: var Sim, reason, endRule: string, detail = "") =
   var scores = newJArray()
   var raw: seq[int]
   let faulted = reason == "fault"
+  let unscored = reason != "complete"
   for seat in 0 ..< Seats:
     let count = if faulted: 0 else: sim.delivered[seat]
     raw.add(count)
     delivered.add(%count)
-    scores.add(%float(count))
+    scores.add(if unscored: newJNull() else: %float(count))
   var total = 0
   for value in raw:
     total += value
-  let winner = if faulted: -1 else: winnerOf(raw)
+  let winner = if unscored: -1 else: winnerOf(raw)
   let winnerNode = if winner < 0: newJNull() else: %winner
   sim.events.add(newEvent(seEnd, sim.tick, sim.turn, %*{
     "reason": reason,

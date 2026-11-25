@@ -162,8 +162,10 @@ proc seatRequestsLocked(gs: GameState): array[Seats, SeatSnapshot] =
       view: view,
       prompt: gs.seats.seats[slot].prompt,
       baseline: baselineInput(view),
-      scripted: effectiveScriptNow(gs.seats.seats[slot]),
-      previous: gs.game.plans[slot])
+      scripted: effectiveScript(gs.seats.seats[slot]),
+      previous: gs.game.plans[slot],
+      connected: gs.seats.seats[slot].connected,
+      registered: gs.seats.seats[slot].registered)
 
 proc applyDecision(gs: var GameState, decision: PlayerDecision, turn: int) =
   ## `turn` is the turn these plans are FOR. `sim.turn` still holds the
@@ -278,7 +280,11 @@ proc exchangeDecisions(requests: seq[JsonNode], timeoutMs: int):
         if result[position].len == 0 and appState.actionReplies.hasKey(slot):
           result[position] = appState.actionReplies[slot]
           appState.actionReplies.del(slot)
-        if result[position].len == 0 and appState.startedAttempts.hasKey(id):
+        if result[position].len == 0 and not appState.playerSockets.hasKey(slot):
+          result[position] = $(%*{"type": "disconnected",
+            "training_attempt": (if appState.startedAttempts.hasKey(id):
+              appState.startedAttempts[id] else: newJNull())})
+        elif result[position].len == 0 and appState.startedAttempts.hasKey(id):
           result[position] = $(%*{"type": "attempt_timeout",
             "training_attempt": appState.startedAttempts[id]})
 
@@ -322,7 +328,7 @@ proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime, fail
         endEpisode(appState.game, "complete", "full_time")
       else:
         endEpisode(appState.game, (if failed: "fault" else: "deadline"),
-          (if failed: "runtime_failure" else: "interrupted_or_unresolved"))
+          (if failed: "host_error" else: "wall_clock"))
     if resultsJson(appState.game)["reason"].getStr() != "complete": interrupted = true
     results = resultsJson(appState.game)
     var cleanup = newJObject()
@@ -358,7 +364,8 @@ proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime, fail
             promptObservation(appState.issuedObservations[id], appState.selection, @[attempt]), @[attempt], none(string), newJNull(),
             asMissing, terminal = true)
       var outcomes = newJObject()
-      for seat in 0 ..< Seats: outcomes[$seat] = results["scores"][seat]
+      if not interrupted:
+        for seat in 0 ..< Seats: outcomes[$seat] = results["scores"][seat]
       appState.trajectory.finish(
         if failed: esFailed
         elif not interrupted and appState.game.finished and results["reason"].getStr() == "complete":
@@ -405,21 +412,40 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
         break
       sleep(200)
 
+    if interruptionRequested():
+      finalizationStarted = true
+      finishEpisode(runtimeConfig, episodeDeadline)
+      return
+
     var missing = -1
+    var missingReason = ""
     withLock stateLock:
       appState.started = true
       for slot in 0 ..< Seats:
-        if not appState.seats.seats[slot].everConnected and missing < 0:
+        if (not appState.seats.seats[slot].connected or
+            not appState.seats.seats[slot].registered) and missing < 0:
           missing = slot
+          missingReason =
+            if not appState.seats.seats[slot].everConnected:
+              "seat " & $slot & " never connected before match start"
+            elif not appState.seats.seats[slot].connected:
+              "seat " & $slot & " disconnected before match start"
+            else:
+              "seat " & $slot & " never registered before match start"
         appState.game.policyKinds[slot] = policyKindOf(appState.seats.seats[slot])
       logLine("starting with ", appState.playerSockets.len, "/", Seats,
         " seats connected")
       appState.broadcastLocked()
     if missing >= 0:
-      declarePlayerFailure(missing,
-        "seat " & $missing & " never connected; it plays the dispatcher " &
-        "baseline and the match continues",
+      logLine("match aborted before start: ", missingReason)
+      declarePlayerFailure(missing, missingReason,
         min(episodeDeadline, getMonoTime() + initDuration(seconds = 5)))
+      withLock stateLock:
+        inc appState.game.fallbackCauses[missing][fcDisconnected]
+        endEpisode(appState.game, "fault", "host_error", missingReason)
+      finalizationStarted = true
+      finishEpisode(runtimeConfig, episodeDeadline)
+      return
 
     var guarded = false
     let turns = turnsPerEpisode(cfg)
@@ -432,17 +458,15 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
         break
       let turnStart = getMonoTime()
       let elapsed = float((turnStart - monoStart).inNanoseconds) / 1_000_000_000.0
-      ## Budget guard: settle early rather than overrun. Switching to the
-      ## scripted layer costs microseconds a turn, so the episode ends
-      ## complete/full_time instead of deadline.
+      ## Budget guard: stop issuing new model turns once the remaining wall-clock
+      ## budget cannot fit another turn; model seats fail unscored rather than
+      ## receiving a substituted scripted plan.
       if not guarded and budgetGuardEngaged(elapsed, cfg.turnBudgetSeconds,
           cfg.wallClockBudgetSeconds):
         guarded = true
         withLock stateLock:
           appState.game.events.add(newEvent(seBudgetGuard, appState.game.tick,
             turn, %*{"remaining_s": cfg.wallClockBudgetSeconds - elapsed}))
-          for slot in 0 ..< Seats:
-            inc appState.game.fallbackCauses[slot][fcBudgetGuard]
         logLine("budget guard engaged at turn ", turn, " (",
           int(elapsed), "s elapsed)")
 

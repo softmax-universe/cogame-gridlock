@@ -16,6 +16,8 @@ type
     baseline*: BaselineInput
     scripted*: ScriptKind
     previous*: RoutingPlan
+    connected*: bool
+    registered*: bool
 
   PlayerFallback* = object
     seat*: int
@@ -50,12 +52,16 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
   result.evidence.response = %raw
   var timedOut = false
   var noCredentials = false
+  var disconnected = false
   try:
     let reply = parseJson(raw)
     if reply.hasKey("training_attempt") and reply["training_attempt"].kind != JNull:
       result.evidence = readAttemptEvidence(reply["training_attempt"])
       if result.evidence.origin in {aoTeacher, aoHuman}:
         result.evidence.origin = aoUnknown
+    if reply["type"].getStr() == "disconnected":
+      disconnected = true
+      raise newException(GridlockError, "player disconnected before supplying a routing plan")
     if reply["type"].getStr() == "attempt_timeout":
       timedOut = true
       raise newException(GridlockError, "player plan timed out after model request")
@@ -104,7 +110,9 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
   except CatchableError as error:
     result.kind = pkRejected
     result.cause =
-      if noCredentials:
+      if disconnected:
+        fcDisconnected
+      elif noCredentials:
         fcNoCredentials
       elif timedOut:
         fcTimeout
@@ -121,12 +129,25 @@ proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
     guarded: bool, turnBudgetSeconds: float,
     exchange: DecisionExchange): PlayerDecision =
   ## Send all private views before either shared deadline starts. One invalid
-  ## or missing reply gets a second attempt; a model seat that still fails
-  ## surfaces in `failedSeats` rather than receiving a substituted baseline move.
+  ## or missing reply gets a second attempt; a model seat that still fails, or
+  ## any absent/disconnected seat, surfaces in `failedSeats` rather than
+  ## receiving a substituted baseline move.
   var pending: seq[int]
   var lastFailure: array[Seats, string]
   for seat in 0 ..< Seats:
-    if seats[seat].scripted != skNone:
+    if not seats[seat].registered or not seats[seat].connected:
+      let detail =
+        if not seats[seat].registered: "seat never registered"
+        else: "player disconnected"
+      var missing = newDecisionAttempt($seat & "-" & $turn & "-" & $seat & "-0",
+        "external", aoUnknown)
+      missing.rejectionReason = some(detail)
+      result.attempts[seat].add(missing)
+      result.fallbacks.add(PlayerFallback(seat: seat, attempt: 0,
+        cause: fcDisconnected, detail: detail))
+      lastFailure[seat] = detail
+      result.failedSeats.add(seat)
+    elif seats[seat].scripted != skNone:
       result.plans[seat] = scriptedPlan(seats[seat].baseline, seats[seat].scripted)
     elif guarded:
       result.fallbacks.add(PlayerFallback(seat: seat, attempt: 0,
@@ -135,6 +156,14 @@ proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
       result.failedSeats.add(seat)
     else:
       pending.add(seat)
+
+  if result.failedSeats.len > 0:
+    let seat = result.failedSeats[0]
+    let detail =
+      if lastFailure[seat].len > 0: lastFailure[seat]
+      else: "player failed to supply a valid routing plan"
+    result.failureDetail = "seat " & $seat & " failed on turn " & $turn & ": " & detail
+    return
 
   let turnStart = getMonoTime()
   for attempt in 1 .. 2:
@@ -190,7 +219,7 @@ proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
         result.fallbacks.add(PlayerFallback(seat: seat, attempt: attempt,
           cause: proposal.cause, detail: detail))
         lastFailure[seat] = detail
-        if proposal.cause == fcNoCredentials:
+        if proposal.cause in {fcNoCredentials, fcDisconnected}:
           result.failedSeats.add(seat)
         else:
           retry.add(seat)

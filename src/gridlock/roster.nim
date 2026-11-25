@@ -2,8 +2,8 @@
 ## `src/ctf/roster.nim`, minus the reward/account machinery gridlock has no
 ## use for.
 ##
-## A seat that never registers plays the dispatcher baseline. Malformed
-## registration is rejected before any frozen policy fields change.
+## Every seat must connect and register explicitly before gameplay starts.
+## Malformed registration is rejected before any frozen policy fields change.
 
 import std/[json, strutils]
 import types
@@ -11,7 +11,7 @@ import baselines
 
 type
   PolicyKind* = enum
-    pkScripted, pkPrompt, pkExternal
+    pkUnregistered, pkScripted, pkPrompt, pkExternal
 
   SeatRegistration* = object
     kind*: PolicyKind
@@ -30,7 +30,7 @@ proc initRoster*(tokens: seq[string]): Roster =
   result.tokens = tokens
   for seat in 0 ..< Seats:
     result.seats[seat] = SeatRegistration(
-      kind: pkScripted, scripted: skDispatcher, policyLabel: "",
+      kind: pkUnregistered, scripted: skNone, policyLabel: "",
       connected: false, everConnected: false, registered: false)
 
 proc authorize*(roster: Roster, slot: int, token: string): bool =
@@ -64,7 +64,10 @@ proc applyRegistration*(roster: var Roster, slot: int, payload: JsonNode) =
     else: raise newException(GridlockError, "scripted policy must be text or null")
   let resolvedScript =
     if kind == pkScripted:
-      if scripted == skNone: skDispatcher else: scripted
+      if scripted == skNone:
+        raise newException(GridlockError,
+          "scripted player must register an explicit scripted policy")
+      scripted
     else:
       if scripted != skNone:
         raise newException(GridlockError,
@@ -79,20 +82,17 @@ proc applyRegistration*(roster: var Roster, slot: int, payload: JsonNode) =
   registration.prompt = clipRunes(payload["prompt"].getStr().strip(), 4000)
   registration.registered = true
   roster.seats[slot] = registration
+
 proc policyKindOf*(seat: SeatRegistration): string =
-  if seat.kind == pkScripted: "scripted" else: "llm"
+  case seat.kind
+  of pkScripted: "scripted"
+  of pkPrompt, pkExternal: "llm"
+  of pkUnregistered: "unregistered"
 
 proc effectiveScript*(seat: SeatRegistration): ScriptKind =
-  ## What the seat REGISTERED as. `effectiveScriptNow` is what it plays this
-  ## turn; the registration itself survives a drop so a reconnect revives it.
-  seat.scripted
-
-proc effectiveScriptNow*(seat: SeatRegistration): ScriptKind =
-  ## A seat that connected and then dropped keeps playing, with its plan
-  ## source degraded to `dispatcher` — there is nobody to answer for the
-  ## policy, and a model call for an absent seat is spend with no owner. It
-  ## revives on reconnect because the registration is untouched.
-  if seat.everConnected and not seat.connected:
-    skDispatcher
+  ## Explicit scripted policy for a registered scripted seat, or `skNone`.
+  ## Unregistered or disconnected seats never acquire a fallback baseline.
+  if seat.registered and seat.kind == pkScripted:
+    seat.scripted
   else:
-    effectiveScript(seat)
+    skNone
