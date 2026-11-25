@@ -25,6 +25,7 @@ for flow in (
     "invalid",
     "ambiguous",
     "missing-endpoint",
+    "missing-model",
     "sampled",
     "greedy-null",
     "greedy-tokens",
@@ -137,6 +138,7 @@ for flow in (
             "COWORLD_EPISODE_ID": str(uuid.uuid4()),
             "COWORLD_GAME_VERSION": "native-fixture-v1",
             "COWORLD_SOURCE_REVISION": SOURCE_REVISION,
+            "COWORLD_LLM_ENABLED": "true",
             "COWORLD_LLM_ENDPOINT": (
                 ""
                 if flow == "missing-endpoint"
@@ -147,6 +149,9 @@ for flow in (
             "PLAYER_PROMPT": "private-guidance-fixture",
             "PLAYER_SCRIPTED": "",
         }
+        if flow == "missing-model":
+            env.pop("COWORLD_LLM_MODEL", None)
+            env.pop("PLAYER_MODEL", None)
         processes, logs = [], []
         try:
             log = (output / "game.log").open("w")
@@ -185,7 +190,13 @@ for flow in (
             ]
             decisions, episode = events[:-1], events[-1]
             assert (output / "trajectory.jsonl").stat().st_mode & 0o777 == 0o600
-            if flow in {"invalid", "ambiguous", "missing-endpoint", "provider-error"}:
+            if flow in {
+                "invalid",
+                "ambiguous",
+                "missing-endpoint",
+                "missing-model",
+                "provider-error",
+            }:
                 assert episode["status"] == "truncated"
                 assert episode["participant_outcomes"] is None
                 assert all(
@@ -197,7 +208,7 @@ for flow in (
                 failure = json.loads((output / "player_failure.json").read_text())
                 assert failure["failed_policy_index"] == 0
                 assert "failed to supply a valid routing plan" in failure["message"]
-                if flow == "missing-endpoint":
+                if flow in {"missing-endpoint", "missing-model"}:
                     assert "no_credentials" in failure["message"]
                     assert len(calls) == 0
                     expected_attempts = 1

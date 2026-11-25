@@ -159,10 +159,29 @@ with open(os.path.join(work, "config.json"), "w") as fh:
 
 by_id = {p.get("id"): p for p in (manifest.get("player") or [])}
 extra_env = [kv for kv in (os.environ.get("SMOKE_EXTRA_ENV") or "").split() if "=" in kv]
+has_llm_endpoint = any(
+    kv.startswith("COWORLD_LLM_ENDPOINT=") and kv.split("=", 1)[1]
+    for kv in extra_env
+)
+scripted_id = next(
+    (
+        p.get("id")
+        for p in (manifest.get("player") or [])
+        if (p.get("env") or {}).get("PLAYER_SCRIPTED")
+    ),
+    None,
+)
 
 for slot in range(seats):
     player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
     entry = by_id.get(player_id) or {}
+    if (
+        not has_llm_endpoint
+        and (entry.get("env") or {}).get("COWORLD_LLM_ENABLED") == "true"
+        and scripted_id
+    ):
+        player_id = scripted_id
+        entry = by_id[scripted_id]
     env_args = []
     for key, value in (entry.get("env") or {}).items():
         env_args += ["-e", f"{key}={value}"]

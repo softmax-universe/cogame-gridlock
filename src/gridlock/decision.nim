@@ -65,7 +65,7 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
       raise newException(GridlockError, "player action envelope mismatch")
     if reply{"cause"}.getStr() == "no_credentials":
       noCredentials = true
-      raise newException(GridlockError, "no native model endpoint configured")
+      raise newException(GridlockError, "no native model endpoint or model configured")
     if reply{"source"}.getStr() != "llm":
       raise newException(GridlockError, "player action source must be llm")
     let proposed = reply["action"]

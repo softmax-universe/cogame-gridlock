@@ -32,35 +32,43 @@ proc runDecision(call: PlayerCall) {.gcsafe.} =
   var cause = ""
   var attempt = newJNull()
   var failure = ""
-  let client = newLlmClient(parseInt(getEnv("PLAYER_MAX_OUTPUT_TOKENS", "900")),
-    getEnv("PLAYER_MODEL", "anthropic/claude-haiku-4.5"))
-  if client.disabled:
-    cause = "no_credentials"
-    echo "gridlock player: native model endpoint is not configured"
-  else:
-    proc beforeCall(evidence: DecisionAttempt) =
-      let started = evidence.attemptEvidenceJson()
+  try:
+    let client = newLlmClient(parseInt(getEnv("PLAYER_MAX_OUTPUT_TOKENS", "900")),
+      getEnv("PLAYER_MODEL").strip())
+    if client.disabled:
+      cause = "no_credentials"
+      if client.model.len == 0:
+        echo "gridlock player: native model is not configured"
+      else:
+        echo "gridlock player: native model endpoint is not configured"
+    else:
+      proc beforeCall(evidence: DecisionAttempt) =
+        let started = evidence.attemptEvidenceJson()
+        {.gcsafe.}:
+          withLock evidenceLock: workerEvidence = $started
+        let sent = call.socket[].sendNativeText($(%*{"type": "attempt_started",
+          "decision_id": call.decisionId, "training_attempt": started}), call.deadline)
+        if sent.kind != wsReady:
+          raise newException(GridlockError, "native attempt start was not delivered")
+      try:
+        let response = client.choosePromptPlan(call.selection, call.prompt, call.observation,
+          call.attempt > 1, call.deadline, call.slot, call.decisionId & "-model",
+          call.policy, beforeCall)
+        let previous =
+          if observation["you"]["last_plan"].kind == JNull: defaultPlan()
+          else: planFromJson(observation["you"]["last_plan"])
+        action = planJson(parsePlan(response, previous))
+      except CatchableError as error:
+        failure = error.msg
+        echo "gridlock player: native policy call failed"
+        client.lastAttempt.rejectionReason = some(failure)
+      attempt = client.lastAttempt.attemptEvidenceJson()
       {.gcsafe.}:
-        withLock evidenceLock: workerEvidence = $started
-      let sent = call.socket[].sendNativeText($(%*{"type": "attempt_started",
-        "decision_id": call.decisionId, "training_attempt": started}), call.deadline)
-      if sent.kind != wsReady:
-        raise newException(GridlockError, "native attempt start was not delivered")
-    try:
-      let response = client.choosePromptPlan(call.selection, call.prompt, call.observation,
-        call.attempt > 1, call.deadline, call.slot, call.decisionId & "-model",
-        call.policy, beforeCall)
-      let previous =
-        if observation["you"]["last_plan"].kind == JNull: defaultPlan()
-        else: planFromJson(observation["you"]["last_plan"])
-      action = planJson(parsePlan(response, previous))
-    except CatchableError as error:
-      failure = error.msg
-      echo "gridlock player: native policy call failed"
-      client.lastAttempt.rejectionReason = some(failure)
-    attempt = client.lastAttempt.attemptEvidenceJson()
-    {.gcsafe.}:
-      withLock evidenceLock: workerEvidence = $attempt
+        withLock evidenceLock: workerEvidence = $attempt
+  except CatchableError as error:
+    cause = "no_credentials"
+    failure = error.msg
+    echo "gridlock player: native model configuration invalid"
   if not interruptionRequested():
     var frame = %*{"type": "action", "decision_id": call.decisionId,
       "protocol": PlayerProtocol, "action": action, "source": source,
