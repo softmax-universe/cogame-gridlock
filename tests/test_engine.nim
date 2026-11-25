@@ -84,7 +84,7 @@ suite "wall-clock guards":
     game.routeFault = routeStartFailure(game, g)
     check invariantFailure(game).len > 0
 
-  test "a sim fault yields fault/sim_fault with zeros and a partial replay":
+  test "a sim fault yields fault/sim_fault with null scores and a partial replay":
     var game = newTestSim(960, 21)
     discard runTurn(game, scriptedPlansFor(game, allKinds(skDispatcher)))
     ## Plant the invariant break the guard is there to catch.
@@ -105,22 +105,22 @@ suite "wall-clock guards":
     check results["reason"].getStr() == "fault"
     check results["winner"].kind == JNull
     for seat in 0 ..< Seats:
-      check results["scores"][seat].getFloat() == 0.0
+      check results["scores"][seat].kind == JNull
     let parsed = parseReplayBytes(replayBytes(game, results))
     check parsed.results["reason"].getStr() == "fault"
 
 suite "seats that misbehave":
-  test "a seat that never registers plays the dispatcher baseline":
+  test "only explicitly registered scripted policies select a baseline":
     var seats = initRoster(@["a", "b", "c", "d"])
-    check effectiveScript(seats.seats[0]) == skDispatcher
-    check policyKindOf(seats.seats[0]) == "scripted"
-    ## Registering with neither field is the same thing.
-    seats.applyRegistration(0, %*{"type": "register", "kind": "scripted",
-      "scripted": newJNull(), "policy": "test", "prompt": ""})
-    check effectiveScript(seats.seats[0]) == skDispatcher
+    check effectiveScript(seats.seats[0]) == skNone
+    check policyKindOf(seats.seats[0]) == "unregistered"
+    expect GridlockError:
+      seats.applyRegistration(0, %*{"type": "register", "kind": "scripted",
+        "scripted": newJNull(), "policy": "test", "prompt": ""})
+    check effectiveScript(seats.seats[0]) == skNone
     ## The authoritative game retains the private prompt for evidence checks.
     seats.applyRegistration(1, %*{"type": "register", "kind": "prompt",
-      "scripted": newJNull(), "policy": "gridlock-flowwright", "scripted": newJNull(), "prompt": "private"})
+      "scripted": newJNull(), "policy": "gridlock-flowwright", "prompt": "private"})
     check effectiveScript(seats.seats[1]) == skNone
     check policyKindOf(seats.seats[1]) == "llm"
     check seats.seats[1].policyLabel == "gridlock-flowwright"
@@ -129,40 +129,6 @@ suite "seats that misbehave":
       "scripted": "beeline", "policy": "test", "prompt": ""})
     check effectiveScript(seats.seats[2]) == skBeeline
     check policyKindOf(seats.seats[2]) == "scripted"
-
-  test "a mid-match disconnect degrades to dispatcher and revives on reconnect":
-    ## The note: "A seat that disconnects mid-match keeps playing: its plan
-    ## source degrades to `dispatcher` and revives on reconnect."
-    var seats = initRoster(@["a", "b", "c", "d"])
-    seats.applyRegistration(0, %*{"type": "register",
-      "kind": "prompt", "policy": "gridlock-flowwright", "scripted": newJNull(), "prompt": "private"})
-    ## The upgrade handler's two assignments.
-    seats.seats[0].connected = true
-    seats.seats[0].everConnected = true
-    check effectiveScriptNow(seats.seats[0]) == skNone
-    ## The close handler's assignment: the socket dropped mid-match.
-    seats.seats[0].connected = false
-    check effectiveScriptNow(seats.seats[0]) == skDispatcher
-    ## The registration itself is untouched, which is what lets it revive.
-    check effectiveScript(seats.seats[0]) == skNone
-    check policyKindOf(seats.seats[0]) == "llm"
-    seats.seats[0].connected = true
-    check effectiveScriptNow(seats.seats[0]) == skNone
-    ## A seat that never connected at all is unaffected: it was already
-    ## playing dispatcher, and it is not "degraded" by anything.
-    check effectiveScriptNow(seats.seats[3]) == skDispatcher
-    ## A scripted seat plays its own baseline while it is connected, and
-    ## degrades the same way when it drops: nobody is behind the seat.
-    seats.applyRegistration(1, %*{"type": "register", "kind": "scripted", "scripted": "beeline", "policy": "test", "prompt": ""})
-    seats.seats[1].connected = true
-    seats.seats[1].everConnected = true
-    check effectiveScriptNow(seats.seats[1]) == skBeeline
-    seats.seats[1].connected = false
-    check effectiveScriptNow(seats.seats[1]) == skDispatcher
-    ## The server reads this every turn, so the degrade is applied where the
-    ## seat's request is built.
-    let serverSource = readSource("src/gridlock/server.nim")
-    check serverSource.contains("effectiveScriptNow(gs.seats.seats[slot])")
 
   test "a no-show is declared to COGAME_PLAYER_FAILURE_URI":
     let dir = getTempDir() / "gridlock-failure-test"
