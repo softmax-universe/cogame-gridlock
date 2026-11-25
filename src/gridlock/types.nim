@@ -254,7 +254,7 @@ proc cleanLine*(text: string, limit: int): string =
       flat.add(' ')
     else:
       flat.add($rune)
-  clipRunes(strutils.strip(flat), limit)
+  strutils.strip(clipRunes(strutils.strip(flat), limit))
 
 # ---------------------------------------------------------------------------
 # Grid helpers used by every module.
