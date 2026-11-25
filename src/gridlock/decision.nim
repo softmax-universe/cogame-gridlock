@@ -1,7 +1,7 @@
 ## Game-owned decision exchange, strict plan validation, and turn timing.
 ## Model calls and candidate ranking live in ordinary player policies.
 
-import std/[json, monotimes, options, times]
+import std/[json, monotimes, options, strutils, times]
 import bitworld/[decision_trajectory, native_stop]
 import types, view, plan, baselines
 
@@ -114,10 +114,14 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
         fcDisconnected
       elif noCredentials:
         fcNoCredentials
-      elif timedOut:
+      elif timedOut or (result.evidence.origin == aoModel and
+          result.evidence.rejectionReason == some("native transport nhDeadline")):
         fcTimeout
-      elif result.evidence.origin == aoModel and result.evidence.httpStatus.isSome and
-          result.evidence.httpStatus.get() != 200:
+      elif result.evidence.origin == aoModel and (
+          (result.evidence.httpStatus.isSome and result.evidence.httpStatus.get() != 200) or
+          result.evidence.responseComplete == some(false) or
+          (result.evidence.rejectionReason.isSome and
+            result.evidence.rejectionReason.get().startsWith("native transport "))):
         fcTransportError
       else:
         fcParseError

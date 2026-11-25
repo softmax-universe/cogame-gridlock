@@ -1,4 +1,4 @@
-import std/[json, options, unittest]
+import std/[json, options, strutils, unittest]
 import gridlock/[types, plan, baselines, view, decision]
 import bitworld/decision_trajectory
 
@@ -149,6 +149,47 @@ suite "ordinary player decision exchange":
     check proposal.kind == pkAccepted
     check proposal.evidence.accepted
     check proposal.plan.dispatch == 70
+
+  test "model reply with say or note truncated onto a space round-trips cleanly":
+    let sayWithBoundarySpace = "Metering vans to clear the jams in centre now"
+    let noteWithBoundarySpace = "x".repeat(MaxNoteRunes - 1) & " trailing words"
+    let responseText = $(%*{"dispatch": 70, "say": sayWithBoundarySpace,
+      "note": noteWithBoundarySpace})
+    let submittedAction = planJson(parsePlan(responseText, defaultPlan()))
+    var evidence = newDecisionAttempt("boundary-space", "model-policy", aoModel)
+    evidence.response = %responseText
+    evidence.model = some("fixture-model")
+    evidence.rawResponse = %($(%*{"model": "fixture-model", "content": [
+      {"type": "text", "text": responseText}]}))
+    evidence.responseComplete = some(true)
+    evidence.responseReaderJoined = some(true)
+    evidence.httpStatus = some(200)
+    let raw = $(%*{"type": "action", "protocol": PlayerProtocol, "decision_id": "1",
+      "source": "llm", "action": submittedAction,
+      "training_attempt": evidence.attemptEvidenceJson()})
+    let proposal = playerProposal(raw, "1", 0, snapshots()[0])
+    check proposal.kind == pkAccepted
+    check proposal.evidence.accepted
+    check proposal.evidence.parsedAction == planJson(proposal.plan)
+
+  test "native transport deadline and failure classify separately from parse errors":
+    var deadlineEvidence = newDecisionAttempt("deadline", "model-policy", aoModel)
+    deadlineEvidence.rejectionReason = some("native transport nhDeadline")
+    let deadlineRaw = $(%*{"type": "action", "protocol": PlayerProtocol, "decision_id": "1",
+      "source": "llm", "action": newJNull(),
+      "training_attempt": deadlineEvidence.attemptEvidenceJson()})
+    let deadlineProposal = playerProposal(deadlineRaw, "1", 0, snapshots()[0])
+    check deadlineProposal.kind == pkRejected
+    check deadlineProposal.cause == fcTimeout
+
+    var transportEvidence = newDecisionAttempt("transport", "model-policy", aoModel)
+    transportEvidence.rejectionReason = some("native transport nhTransportFailure")
+    let transportRaw = $(%*{"type": "action", "protocol": PlayerProtocol, "decision_id": "1",
+      "source": "llm", "action": newJNull(),
+      "training_attempt": transportEvidence.attemptEvidenceJson()})
+    let transportProposal = playerProposal(transportRaw, "1", 0, snapshots()[0])
+    check transportProposal.kind == pkRejected
+    check transportProposal.cause == fcTransportError
 
 
 suite "ordinary exchange retries":

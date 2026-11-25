@@ -1,7 +1,7 @@
 ## Strict single-object JSON parsing, field validation, rune-safe truncation,
 ## and the derived router coefficients.
 
-import std/[json, unicode, unittest]
+import std/[json, strutils, unicode, unittest]
 import support/helpers
 
 suite "strict parsing":
@@ -192,6 +192,24 @@ suite "rune-safe truncation":
     check cleanLine("a\nb\tc", 140) == "a b c"
     check clipRunes("short", 140) == "short"
     check clipRunes("anything", 0) == ""
+
+  test "cleanLine is idempotent when truncation lands on whitespace":
+    let sayWithBoundarySpace = "Metering vans to clear the jams in centre now"
+    check sayWithBoundarySpace.runeLen > MaxSayRunes
+    check sayWithBoundarySpace[MaxSayRunes - 1] == ' '
+    let onceSay = cleanLine(sayWithBoundarySpace, MaxSayRunes)
+    check onceSay == cleanLine(onceSay, MaxSayRunes)
+    check onceSay.runeLen < MaxSayRunes
+
+    let noteWithBoundarySpace = repeat("x", MaxNoteRunes - 1) & " trailing words"
+    let onceNote = cleanLine(noteWithBoundarySpace, MaxNoteRunes)
+    check onceNote == cleanLine(onceNote, MaxNoteRunes)
+    check onceNote.runeLen == MaxNoteRunes - 1
+
+    let raw = $ %*{"dispatch": 80, "say": sayWithBoundarySpace, "note": noteWithBoundarySpace}
+    let parsed = parsePlan(raw, defaultPlan())
+    let reparsed = parsePlanObject(planJson(parsed), defaultPlan())
+    check planJson(parsed) == planJson(reparsed)
 
 suite "derived coefficients":
   test "replanQueue spans 3..13 across the patience range":
