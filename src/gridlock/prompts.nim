@@ -70,14 +70,14 @@ district they should prefer or avoid, and which parcel they take next. That is a
 You cannot steer one van, change a light, or talk to another fleet.
 """
 
-const ReplyRules = """Reply with a single JSON object and NOTHING else. Your reply MUST begin with '{'.
+const ReplyRules = """Reply with a single JSON object and nothing else (no surrounding prose).
 Schema:
-{"congestion_weight":0-100, // how strongly a queued road is avoided when planning
- "patience":0-100,          // how full the next road must be before a van re-plans
- "dispatch":0-100,          // percent of your 50 vans allowed on the road at once
- "spread":0-100,            // 0 = release in bursts of 6, 100 = release one at a time
- "corridor":[bx,by]|null,   // district (0-2,0-2) your vans should prefer to route through
- "avoid":[bx,by]|null,      // district your vans should route around
+{"congestion_weight":0-100, // integer 0-100: how strongly a queued road is avoided when planning
+ "patience":0-100,          // integer 0-100: how full the next road must be before a van re-plans
+ "dispatch":0-100,          // integer 0-100: percent of your 50 vans allowed on the road at once
+ "spread":0-100,            // integer 0-100: 0 = release in bursts of 6, 100 = release one at a time
+ "corridor":[bx,by]|null,   // district [0-2,0-2] your vans should prefer to route through, or null
+ "avoid":[bx,by]|null,      // district [0-2,0-2] your vans should route around (must differ from corridor), or null
  "priority":"near"|"far"|"fifo", // which waiting parcel a van loads next
  "note":"<=140 chars",      // your reasoning, shown to spectators only
  "say":"<=32 chars"}        // one short line, shown to spectators only

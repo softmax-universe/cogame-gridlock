@@ -43,10 +43,10 @@ proc userMessage*(request: SeatRequest, retryHint: bool): string =
     result.add("\n\n")
   result.add(request.viewJson)
   if retryHint:
-    result.add("\n\nYour previous reply was invalid. Respond with ONLY the " &
-      "requested JSON object; it must begin with '{' and carry " &
-      "congestion_weight, patience, dispatch, spread, corridor, avoid, " &
-      "priority, note and say.")
+    result.add("\n\nYour previous reply was invalid. Respond with ONLY a " &
+      "single JSON object (no surrounding prose) using valid types and ranges " &
+      "for congestion_weight, patience, dispatch, spread, corridor, avoid, " &
+      "priority, note, and say.")
 
 
 proc requestFor(client: LlmClient, system, user: string, slot: int):

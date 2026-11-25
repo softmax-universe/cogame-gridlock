@@ -1,4 +1,4 @@
-## Game-owned decision exchange, plan repair, fallback, and turn timing.
+## Game-owned decision exchange, strict plan validation, and turn timing.
 ## Model calls and candidate ranking live in ordinary player policies.
 
 import std/[json, monotimes, options, times]
@@ -28,6 +28,8 @@ type
     fallbacks*: seq[PlayerFallback]
     attempts*: array[Seats, seq[DecisionAttempt]]
     selectedAttemptIds*: array[Seats, Option[string]]
+    failedSeats*: seq[int]
+    failureDetail*: string
 
   DecisionExchange* = proc (requests: seq[JsonNode], timeoutMs: int):
     seq[string] {.gcsafe.}
@@ -39,12 +41,14 @@ type
     plan*: RoutingPlan
     evidence*: DecisionAttempt
     cause*: FallbackCause
+    detail*: string
 
 proc playerProposal*(raw: string, requestId: string, seat: int,
     snapshot: SeatSnapshot): PlayerProposal =
-  ## Shared hosted/language parser boundary; installation remains engine-owned.
+  ## Shared player action parser boundary; installation remains engine-owned.
   result.evidence = newDecisionAttempt($seat & "-" & $requestId, "external", aoUnknown)
   result.evidence.response = %raw
+  var timedOut = false
   try:
     let reply = parseJson(raw)
     if reply.hasKey("training_attempt") and reply["training_attempt"].kind != JNull:
@@ -52,31 +56,29 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
       if result.evidence.origin in {aoTeacher, aoHuman}:
         result.evidence.origin = aoUnknown
     if reply["type"].getStr() == "attempt_timeout":
+      timedOut = true
       raise newException(GridlockError, "player plan timed out after model request")
     if reply["type"].getStr() != "action" or
         reply["protocol"].getStr() != PlayerProtocol or
         reply["decision_id"].getStr() != requestId:
       raise newException(GridlockError, "player action envelope mismatch")
     if reply{"source"}.getStr() == "fallback":
+      if reply{"cause"}.getStr() != "no_credentials":
+        raise newException(GridlockError,
+          "fallback source is only permitted for no_credentials")
       result.kind = pkReportedFallback
-      result.cause = case reply{"cause"}.getStr()
-        of "no_credentials": fcNoCredentials
-        of "timeout": fcTimeout
-        else: fcTransportError
-      result.evidence.rejectionReason = some("player policy reported fallback")
+      result.cause = fcNoCredentials
+      result.detail = "no native model endpoint configured"
+      result.evidence.rejectionReason = some(result.detail)
       return
     if reply{"source"}.getStr() != "llm":
       raise newException(GridlockError, "player action source must be llm")
     let proposed = reply["action"]
-    case proposed.kind
-    of JString:
-      result.plan = parsePlan(proposed.getStr(), snapshot.previous)
-    of JObject:
-      if not hasAnyPlanKey(proposed):
-        raise newException(GridlockError, "player action has no plan fields")
-      result.plan = repairPlan(proposed, snapshot.previous)
-    else:
-      raise newException(GridlockError, "player action must be a routing object or reply text")
+    if proposed.kind != JObject:
+      if result.evidence.rejectionReason.isSome:
+        raise newException(GridlockError, result.evidence.rejectionReason.get())
+      raise newException(GridlockError, "player action must be a routing plan object")
+    result.plan = parsePlanObject(proposed, snapshot.previous)
     result.plan.source = psLlm
     if result.evidence.origin == aoModel:
       if result.evidence.response.kind != JString:
@@ -106,15 +108,26 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
     result.evidence.accepted = true
   except CatchableError as error:
     result.kind = pkRejected
-    result.cause = fcParseError
-    result.evidence.rejectionReason = some(error.msg)
+    result.cause =
+      if timedOut:
+        fcTimeout
+      elif result.evidence.origin == aoModel and result.evidence.httpStatus.isSome and
+          result.evidence.httpStatus.get() != 200:
+        fcTransportError
+      else:
+        fcParseError
+    result.detail = cleanLine(error.msg, MaxDetailRunes)
+    if result.evidence.rejectionReason.isNone:
+      result.evidence.rejectionReason = some(error.msg)
 
 proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
     guarded: bool, turnBudgetSeconds: float,
     exchange: DecisionExchange): PlayerDecision =
   ## Send all private views before either shared deadline starts. One invalid
-  ## or missing reply gets a second attempt; the game repairs accepted plans.
+  ## or missing reply gets a second attempt; a model seat that still fails
+  ## surfaces in `failedSeats` rather than receiving a substituted baseline move.
   var pending: seq[int]
+  var lastFailure: array[Seats, string]
   for seat in 0 ..< Seats:
     if seats[seat].scripted != skNone or guarded:
       let kind =
@@ -164,6 +177,7 @@ proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
         result.attempts[seat].add(missing)
         result.fallbacks.add(PlayerFallback(seat: seat, attempt: attempt,
           cause: fcTimeout, detail: "player plan timed out"))
+        lastFailure[seat] = "player plan timed out"
         retry.add(seat)
         continue
       let proposal = playerProposal(replies[position],
@@ -176,20 +190,23 @@ proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
         result.selectedAttemptIds[seat] = some(proposal.evidence.attemptId)
       of pkReportedFallback:
         result.fallbacks.add(PlayerFallback(seat: seat, attempt: attempt,
-          cause: proposal.cause, detail: "player policy reported fallback"))
-        if proposal.cause != fcNoCredentials:
-          retry.add(seat)
-        else:
-          result.plans[seat] = dispatcherPlan(seats[seat].baseline)
-          result.plans[seat].source = psFallback
+          cause: proposal.cause, detail: proposal.detail))
+        result.plans[seat] = dispatcherPlan(seats[seat].baseline)
+        result.plans[seat].source = psFallback
       of pkRejected:
+        let detail =
+          if proposal.detail.len > 0: proposal.detail
+          else: "invalid private player reply"
         result.fallbacks.add(PlayerFallback(seat: seat, attempt: attempt,
-          cause: proposal.cause, detail: "invalid private player reply"))
+          cause: proposal.cause, detail: detail))
+        lastFailure[seat] = detail
         retry.add(seat)
     pending = retry
 
   for seat in pending:
-    result.plans[seat] = dispatcherPlan(seats[seat].baseline)
-    result.plans[seat].source = psFallback
-    result.plans[seat].latencyMs =
-      max(0, (getMonoTime() - turnStart).inMilliseconds.int)
+    result.failedSeats.add(seat)
+    if result.failureDetail.len == 0:
+      let detail =
+        if lastFailure[seat].len > 0: lastFailure[seat]
+        else: "player failed to supply a valid routing plan"
+      result.failureDetail = "seat " & $seat & " failed on turn " & $turn & ": " & detail

@@ -126,6 +126,7 @@ for flow in (
             "COGAME_CONFIG_URI": (output / "config.json").as_uri(),
             "COGAME_RESULTS_URI": (output / "results.json").as_uri(),
             "COGAME_SAVE_REPLAY_URI": (output / "replay.json").as_uri(),
+            "COGAME_PLAYER_FAILURE_URI": (output / "player_failure.json").as_uri(),
             "COGAME_SAVE_TRAJECTORY_URI": (output / "trajectory.jsonl").as_uri(),
             "COWORLD_EPISODE_ID": str(uuid.uuid4()),
             "COWORLD_GAME_VERSION": "native-fixture-v1",
@@ -173,69 +174,124 @@ for flow in (
                 for line in (output / "trajectory.jsonl").read_text().splitlines()
             ]
             decisions, episode = events[:-1], events[-1]
-            assert (
-                episode["status"] == "completed"
-                and episode["outcome"]["final_tick"] == 72
-            )
             assert (output / "trajectory.jsonl").stat().st_mode & 0o777 == 0o600
-            subprocess.run([REPLAY_CHECK, str(output / "replay.json")], check=True)
-            replay = json.loads((output / "replay.json").read_text())
-            assert replay["seed"] == 7
-            assert len(replay["plans"]) == 12
-            seen = set()
-            for decision in decisions:
-                assert decision["execution"] is None
-                slot = int(decision["seat"])
-                view = decision["observation"]
-                assert view["turn_end_tick"] - view["turn_start_tick"] == 24
-                assert view["tick_hz"] == 24
-                plan = next(
-                    row
-                    for row in replay["plans"]
-                    if row["seat"] == slot and row["turn"] == view["turn"]
+            if flow in {"invalid", "provider-error"}:
+                assert episode["status"] == "truncated"
+                assert episode["participant_outcomes"] is None
+                assert all(
+                    v == "joined"
+                    for v in episode["outcome"]["player_cleanup"].values()
                 )
-                actual = {
-                    key: value
-                    for key, value in plan.items()
-                    if key not in {"turn", "seat", "source", "latency_ms"}
-                }
-                assert actual == decision["executed_action"]
-                for attempt in decision["attempts"]:
-                    assert attempt["inference_mode"] == "text_action"
-                    if attempt["platform_call_id"] is None:
-                        continue
-                    call_id = attempt["platform_call_id"]
-                    assert call_id not in seen
-                    seen.add(call_id)
-                    request, body = calls[call_id]
-                    assert (
-                        attempt["request"] == request
-                        and json.loads(attempt["raw_response"]) == body
-                    )
-                    assert attempt["response_complete"] is True
-                    assert attempt["response_reader_joined"] is True
-                    assert attempt["http_status"] == (
-                        429 if flow == "provider-error" and slot == 0 else 200
-                    )
-                    assert attempt["prompt"][0]["content"] == request["system"]
-                    assert (
-                        attempt["prompt"][1]["content"]
-                        == request["messages"][0]["content"]
-                    )
-                    if "model" in body:
-                        assert attempt["model"] == "fixture/served"
+                assert not (output / "results.json").exists()
+                assert not (output / "replay.json").exists()
+                failure = json.loads((output / "player_failure.json").read_text())
+                assert failure["failed_policy_index"] == 0
+                assert "failed to supply a valid routing plan" in failure["message"]
+                assert any(
+                    d["seat"] == "0"
+                    and d["action_status"] == "rejected"
+                    and d["executed_action"] is None
+                    and d["selected_attempt_id"] is None
+                    and len(d["attempts"]) == 2
+                    for d in decisions
+                )
+                seen = set()
+                for decision in decisions:
+                    for attempt in decision["attempts"]:
+                        assert attempt["inference_mode"] == "text_action"
+                        if attempt["platform_call_id"] is None:
+                            continue
+                        call_id = attempt["platform_call_id"]
+                        assert call_id not in seen
+                        seen.add(call_id)
+                        request, body = calls[call_id]
                         assert (
-                            attempt["input_tokens"]
-                            == (32768 if flow in {"sampled", "greedy-tokens"} else 12)
-                            and attempt["output_tokens"] == 4
+                            attempt["request"] == request
+                            and json.loads(attempt["raw_response"]) == body
                         )
-                    if flow == "greedy-tokens":
-                        assert len(attempt["prompt_token_ids"]) == 32768
+                        assert attempt["response_complete"] is True
+                        assert attempt["response_reader_joined"] is True
+                assert seen == set(calls)
+                public = "".join(
+                    (output / p).read_text()
+                    for p in ["game.log", *(f"player{i}.log" for i in range(4))]
+                ) + (output / "player_failure.json").read_text()
+                for secret in (
+                    "private-guidance-fixture",
+                    "private-invalid-response",
+                    "private-provider-error",
+                ):
+                    assert secret not in public
+                print(
+                    flow,
+                    len(decisions),
+                    "macros",
+                    len(calls),
+                    "native fixture failure surfaced without fallback",
+                    flush=True,
+                )
+            else:
+                assert (
+                    episode["status"] == "completed"
+                    and episode["outcome"]["final_tick"] == 72
+                )
+                assert not (output / "player_failure.json").exists()
+                subprocess.run([REPLAY_CHECK, str(output / "replay.json")], check=True)
+                replay = json.loads((output / "replay.json").read_text())
+                assert replay["seed"] == 7
+                assert len(replay["plans"]) == 12
+                seen = set()
+                for decision in decisions:
+                    assert decision["execution"] is None
+                    slot = int(decision["seat"])
+                    view = decision["observation"]
+                    assert view["turn_end_tick"] - view["turn_start_tick"] == 24
+                    assert view["tick_hz"] == 24
+                    plan = next(
+                        row
+                        for row in replay["plans"]
+                        if row["seat"] == slot and row["turn"] == view["turn"]
+                    )
+                    actual = {
+                        key: value
+                        for key, value in plan.items()
+                        if key not in {"turn", "seat", "source", "latency_ms"}
+                    }
+                    assert actual == decision["executed_action"]
+                    for attempt in decision["attempts"]:
+                        assert attempt["inference_mode"] == "text_action"
+                        if attempt["platform_call_id"] is None:
+                            continue
+                        call_id = attempt["platform_call_id"]
+                        assert call_id not in seen
+                        seen.add(call_id)
+                        request, body = calls[call_id]
                         assert (
-                            attempt["sampled_token_ids"] == [3, 4]
-                            and attempt["behavior_logprobs"] is None
+                            attempt["request"] == request
+                            and json.loads(attempt["raw_response"]) == body
                         )
-                if decision["action_status"] == "accepted":
+                        assert attempt["response_complete"] is True
+                        assert attempt["response_reader_joined"] is True
+                        assert attempt["http_status"] == 200
+                        assert attempt["prompt"][0]["content"] == request["system"]
+                        assert (
+                            attempt["prompt"][1]["content"]
+                            == request["messages"][0]["content"]
+                        )
+                        if "model" in body:
+                            assert attempt["model"] == "fixture/served"
+                            assert (
+                                attempt["input_tokens"]
+                                == (32768 if flow in {"sampled", "greedy-tokens"} else 12)
+                                and attempt["output_tokens"] == 4
+                            )
+                        if flow == "greedy-tokens":
+                            assert len(attempt["prompt_token_ids"]) == 32768
+                            assert (
+                                attempt["sampled_token_ids"] == [3, 4]
+                                and attempt["behavior_logprobs"] is None
+                            )
+                    assert decision["action_status"] == "accepted"
                     selected = next(
                         a
                         for a in decision["attempts"]
@@ -245,32 +301,25 @@ for flow in (
                         selected["accepted"]
                         and selected["parsed_action"] == decision["executed_action"]
                     )
-                else:
-                    assert decision["selected_attempt_id"] is None
-            assert seen == set(calls)
-            public = (output / "replay.json").read_text() + "".join(
-                (output / p).read_text()
-                for p in ["game.log", *(f"player{i}.log" for i in range(4))]
-            )
-            for secret in (
-                "private-guidance-fixture",
-                "private-invalid-response",
-                "private-provider-error",
-            ):
-                assert secret not in public
-            if flow in {"invalid", "provider-error"}:
-                assert any(
-                    d["action_status"] == "fallback" and len(d["attempts"]) == 2
-                    for d in decisions
+                assert seen == set(calls)
+                public = (output / "replay.json").read_text() + "".join(
+                    (output / p).read_text()
+                    for p in ["game.log", *(f"player{i}.log" for i in range(4))]
                 )
-            print(
-                flow,
-                len(decisions),
-                "macros",
-                len(calls),
-                "native fixture joins",
-                flush=True,
-            )
+                for secret in (
+                    "private-guidance-fixture",
+                    "private-invalid-response",
+                    "private-provider-error",
+                ):
+                    assert secret not in public
+                print(
+                    flow,
+                    len(decisions),
+                    "macros",
+                    len(calls),
+                    "native fixture joins",
+                    flush=True,
+                )
         finally:
             for process in processes:
                 if process.poll() is None:

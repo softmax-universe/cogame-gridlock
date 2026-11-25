@@ -167,11 +167,8 @@ suite "malformed replays are rejected with a message, not a crash":
   test "an out-of-range plan integer":
     let document = parseJson(badRaw)
     document["plans"][0]["congestion_weight"] = %400
-    ## Repair clamps it, so the recovered plan is legal and playback survives.
-    let data = parseReplayBytes($document)
-    let seat = document["plans"][0]["seat"].getInt()
-    let recovered = data.plans[0][seat]
-    check recovered.congestionWeight == 100
+    expect GridlockError:
+      discard parseReplayBytes($document)
 
   test "a missing top-level key":
     let document = parseJson(badRaw)

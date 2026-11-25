@@ -1,8 +1,8 @@
-## The routing plan: the schema a seat emits every turn, tolerant parsing,
-## repair, and the router coefficients derived from it.
+## The routing plan: the schema a seat emits every turn, strict single-object
+## JSON parsing, field validation, and the router coefficients derived from it.
 ##
-## The RESOLVED, repaired, clamped plan is what is installed and what is
-## recorded — playback never re-runs the repair.
+## The RESOLVED plan is what is installed and what is recorded — playback never
+## re-runs validation.
 
 import std/[json, strutils, unicode]
 import types
@@ -12,6 +12,10 @@ const
   DefaultPatience* = 50
   DefaultDispatch* = 100
   DefaultSpread* = 40
+
+  PlanKeys = [
+    "congestion_weight", "patience", "dispatch", "spread",
+    "corridor", "avoid", "priority", "note", "say"]
 
 proc defaultPlan*(): RoutingPlan =
   RoutingPlan(
@@ -27,189 +31,163 @@ proc defaultPlan*(): RoutingPlan =
     source: psScripted,
     latencyMs: 0)
 
-proc clampPct(value: int): int =
-  if value < 0: 0 elif value > 100: 100 else: value
+proc replyHead(text: string): string =
+  ## The head of a raw model reply goes into the exception message, which
+  ## becomes `fallback.detail` in the replay: cut it on RUNE boundaries,
+  ## never bytes. `cleanLine` also flattens the newlines.
+  let head = cleanLine(text, MaxErrorHeadRunes)
+  if head.runeLen >= MaxErrorHeadRunes: head & "..." else: head
 
 # ---------------------------------------------------------------------------
-# Tolerant extraction. Bullwhip's `extractJsonObject` shape: strip fences,
-# take the outermost balanced object even when the model prefixed prose.
+# Strict single-object extraction: bare JSON object or inside a single
+# ordinary outer Markdown code fence (JSON-tagged or plain). Surrounding prose,
+# extra objects, or extra fenced blocks are rejected.
 # ---------------------------------------------------------------------------
+
+proc unwrapSingleFence(trimmed: string): string =
+  if not trimmed.startsWith("```"):
+    return trimmed
+  let nl = trimmed.find('\n')
+  if nl < 0:
+    raise newException(GridlockError, "unclosed markdown code fence in reply")
+  let tag = strutils.strip(trimmed[3 ..< nl], leading = false, trailing = true,
+    chars = {' ', '\t', '\r'})
+  if tag.len > 0 and tag.toLowerAscii() != "json":
+    raise newException(GridlockError,
+      "unsupported markdown code fence tag in reply: " & cleanLine(tag, 24))
+  let rest = trimmed[nl + 1 .. ^1]
+  if not rest.endsWith("```"):
+    raise newException(GridlockError, "unclosed markdown code fence in reply")
+  let closePos = rest.len - 3
+  let prevNl = rest.rfind('\n', last = max(0, closePos - 1))
+  let lineStart = if prevNl < 0: 0 else: prevNl + 1
+  for i in lineStart ..< closePos:
+    if rest[i] notin {' ', '\t'}:
+      raise newException(GridlockError, "closing markdown fence must sit on its own line")
+  let bodyEnd =
+    if prevNl < 0: 0
+    elif prevNl > 0 and rest[prevNl - 1] == '\r': prevNl - 1
+    else: prevNl
+  strutils.strip(rest[0 ..< bodyEnd])
 
 proc extractJsonObject*(text: string): JsonNode =
-  let start = text.find('{')
-  if start < 0:
-    ## The head of a raw model reply goes into the exception message, which
-    ## becomes `fallback.detail` in the replay: cut it on RUNE boundaries,
-    ## never bytes. `cleanLine` also flattens the newlines.
-    let head = cleanLine(text, MaxErrorHeadRunes)
+  let trimmed = strutils.strip(text)
+  if trimmed.len == 0:
+    raise newException(GridlockError, "empty reply")
+  let body = unwrapSingleFence(trimmed)
+  if not body.startsWith("{") or not body.endsWith("}"):
     raise newException(GridlockError,
-      "no JSON object in reply: " &
-      (if head.runeLen >= MaxErrorHeadRunes: head & "..." else: head))
-  var depth = 0
-  var inString = false
-  var escaped = false
-  var stop = -1
-  for i in start ..< text.len:
-    let c = text[i]
-    if inString:
-      if escaped: escaped = false
-      elif c == '\\': escaped = true
-      elif c == '"': inString = false
-      continue
-    case c
-    of '"': inString = true
-    of '{': inc depth
-    of '}':
-      dec depth
-      if depth == 0:
-        stop = i
-        break
-    else: discard
-  if stop < 0:
-    stop = text.rfind('}')
-  if stop <= start:
-    raise newException(GridlockError, "unbalanced JSON object in reply")
-  parseJson(text[start .. stop])
+      "reply must be a single JSON object: " & replyHead(text))
+  try:
+    result = parseJson(body)
+  except CatchableError as error:
+    raise newException(GridlockError,
+      "invalid JSON object in reply (" & cleanLine(error.msg, 80) & "): " &
+      replyHead(text))
+  if result.kind != JObject:
+    raise newException(GridlockError,
+      "reply must be a single JSON object: " & replyHead(text))
 
-proc numberField(node: JsonNode, key: string): tuple[ok: bool, value: int] =
-  ## Accepts an int, a float, a numeric string, and "70%".
-  let field = node{key}
-  if field == nil or field.kind == JNull:
-    return (false, 0)
+proc pctField(node: JsonNode, key: string, fallback: int): int =
+  if not node.hasKey(key):
+    return fallback
+  let field = node[key]
+  if field.kind != JInt:
+    raise newException(GridlockError, key & " must be an integer in 0..100")
+  let value = int(field.getInt())
+  if value < 0 or value > 100:
+    raise newException(GridlockError, key & " out of range 0..100: " & $value)
+  value
+
+proc districtField(node: JsonNode, key: string, fallback: int): int =
+  if not node.hasKey(key):
+    return fallback
+  let field = node[key]
   case field.kind
-  of JInt:
-    (true, int(field.getInt()))
-  of JFloat:
-    (true, int(field.getFloat()))
-  of JBool:
-    (true, if field.getBool(): 100 else: 0)
-  of JString:
-    var text = strutils.strip(field.getStr())
-    if text.endsWith("%"):
-      text = text[0 ..< text.high]
-    text = strutils.strip(text)
-    if text.len == 0:
-      return (false, 0)
-    try:
-      (true, int(parseFloat(text)))
-    except ValueError:
-      (false, 0)
-  else:
-    (false, 0)
-
-proc districtFromName(text: string): int =
-  let wanted = strutils.strip(text).toUpperAscii()
-  for i, name in DistrictNameTable:
-    if name == wanted:
-      return i
-  -1
-
-proc districtField(node: JsonNode, key: string): tuple[ok: bool, value: int] =
-  ## `[bx,by]`, `{"bx":..,"by":..}`, a district name, or null.
-  let field = node{key}
-  if field == nil or field.kind == JNull:
-    return (false, -1)
-  case field.kind
+  of JNull:
+    -1
   of JArray:
-    if field.len != 2:
-      return (true, -1)
-    var bx, by: int
-    for i, child in field.elems:
-      var v = 0
-      case child.kind
-      of JInt: v = int(child.getInt())
-      of JFloat: v = int(child.getFloat())
-      of JString:
-        try: v = int(parseFloat(strutils.strip(child.getStr())))
-        except ValueError: return (true, -1)
-      else: return (true, -1)
-      if v < 0: v = 0
-      if v > DistrictCols - 1: v = DistrictCols - 1
-      if i == 0: bx = v else: by = v
-    (true, districtIndex(bx, by))
-  of JObject:
-    let bxNode = field{"bx"}
-    let byNode = field{"by"}
-    if bxNode == nil or byNode == nil:
-      return (true, -1)
-    var bx = bxNode.getInt()
-    var by = byNode.getInt()
-    if bx < 0: bx = 0
-    if bx > DistrictCols - 1: bx = DistrictCols - 1
-    if by < 0: by = 0
-    if by > DistrictRows - 1: by = DistrictRows - 1
-    (true, districtIndex(bx, by))
-  of JString:
-    (true, districtFromName(field.getStr()))
+    if field.len != 2 or field[0].kind != JInt or field[1].kind != JInt:
+      raise newException(GridlockError,
+        key & " must be [bx, by] with integer coordinates in 0..2 or null")
+    let bx = int(field[0].getInt())
+    let by = int(field[1].getInt())
+    if bx < 0 or bx >= DistrictCols or by < 0 or by >= DistrictRows:
+      raise newException(GridlockError,
+        key & " coordinates out of range 0..2: [" & $bx & "," & $by & "]")
+    districtIndex(bx, by)
   else:
-    (true, -1)
+    raise newException(GridlockError,
+      key & " must be [bx, by] with integer coordinates in 0..2 or null")
 
 proc parsePriority*(text: string): Priority =
-  case strutils.strip(text).toLowerAscii()
-  of "near", "nearest", "close": prNear
-  of "far", "furthest", "farthest": prFar
-  else: prFifo
+  case text
+  of "near": prNear
+  of "far": prFar
+  of "fifo": prFifo
+  else:
+    raise newException(GridlockError,
+      "priority must be \"near\", \"far\", or \"fifo\"")
 
 proc hasAnyPlanKey*(node: JsonNode): bool =
   if node == nil or node.kind != JObject:
     return false
-  for key in ["congestion_weight", "patience", "dispatch", "spread",
-      "corridor", "avoid", "priority", "note", "say"]:
+  for key in PlanKeys:
     if node.hasKey(key):
       return true
   false
 
-proc repairPlan*(node: JsonNode, previous: RoutingPlan): RoutingPlan =
-  ## Every field repaired against `previous` (the plan the seat played last
-  ## turn, or `defaultPlan()` on turn 0). Never raises.
+proc parsePlanObject*(node: JsonNode, previous: RoutingPlan): RoutingPlan =
+  ## Validates a routing plan JSON object against `previous` (the plan the seat
+  ## played last turn, or `defaultPlan()` on turn 0). Omitted optional fields
+  ## keep their documented defaults; invalid types, unknown keys, legacy
+  ## formats, out-of-range values, and conflicting corridor/avoid are rejected.
+  if node == nil or node.kind != JObject:
+    raise newException(GridlockError, "routing plan must be a JSON object")
+  if node.len == 0:
+    raise newException(GridlockError, "reply carried no plan keys")
+  for key in node.keys:
+    if key notin PlanKeys:
+      raise newException(GridlockError,
+        "unknown plan key: " & cleanLine(key, 32))
   result = previous
   result.source = psLlm
   result.latencyMs = 0
   result.note = ""
   result.say = ""
-  block:
-    let got = numberField(node, "congestion_weight")
-    result.congestionWeight =
-      if got.ok: clampPct(got.value) else: previous.congestionWeight
-  block:
-    let got = numberField(node, "patience")
-    result.patience = if got.ok: clampPct(got.value) else: previous.patience
-  block:
-    let got = numberField(node, "dispatch")
-    result.dispatch = if got.ok: clampPct(got.value) else: previous.dispatch
-  block:
-    let got = numberField(node, "spread")
-    result.spread = if got.ok: clampPct(got.value) else: previous.spread
-  block:
-    let got = districtField(node, "corridor")
-    result.corridor = if got.ok: got.value else: previous.corridor
-  block:
-    let got = districtField(node, "avoid")
-    result.avoid = if got.ok: got.value else: previous.avoid
+  result.congestionWeight =
+    pctField(node, "congestion_weight", previous.congestionWeight)
+  result.patience = pctField(node, "patience", previous.patience)
+  result.dispatch = pctField(node, "dispatch", previous.dispatch)
+  result.spread = pctField(node, "spread", previous.spread)
+  result.corridor = districtField(node, "corridor", previous.corridor)
+  result.avoid = districtField(node, "avoid", previous.avoid)
   if result.avoid >= 0 and result.avoid == result.corridor:
-    ## A plan may not prefer and shun the same district.
-    result.avoid = -1
-  let priorityNode = node{"priority"}
-  result.priority =
-    if priorityNode != nil and priorityNode.kind == JString:
-      parsePriority(priorityNode.getStr())
-    else:
-      prFifo
-  let noteNode = node{"note"}
-  if noteNode != nil and noteNode.kind == JString:
+    raise newException(GridlockError,
+      "corridor and avoid cannot name the same district")
+  if node.hasKey("priority"):
+    let priorityNode = node["priority"]
+    if priorityNode.kind != JString:
+      raise newException(GridlockError,
+        "priority must be \"near\", \"far\", or \"fifo\"")
+    result.priority = parsePriority(priorityNode.getStr())
+  else:
+    result.priority = prFifo
+  if node.hasKey("note"):
+    let noteNode = node["note"]
+    if noteNode.kind != JString:
+      raise newException(GridlockError, "note must be a string")
     result.note = cleanLine(noteNode.getStr(), MaxNoteRunes)
-  let sayNode = node{"say"}
-  if sayNode != nil and sayNode.kind == JString:
+  if node.hasKey("say"):
+    let sayNode = node["say"]
+    if sayNode.kind != JString:
+      raise newException(GridlockError, "say must be a string")
     result.say = cleanLine(sayNode.getStr(), MaxSayRunes)
 
 proc parsePlan*(text: string, previous: RoutingPlan): RoutingPlan =
-  ## Tolerant parse + repair. Raises only when no object carrying at least one
-  ## recognised plan key can be recovered — which is what triggers the retry
-  ## and then the scripted fallback.
+  ## Strict parse + validation of a model reply text.
   let node = extractJsonObject(text)
-  if not hasAnyPlanKey(node):
-    raise newException(GridlockError, "reply carried no plan keys")
-  repairPlan(node, previous)
+  parsePlanObject(node, previous)
 
 proc planJson*(plan: RoutingPlan): JsonNode =
   result = %*{
@@ -228,8 +206,14 @@ proc planJson*(plan: RoutingPlan): JsonNode =
     else: %[districtX(plan.avoid), districtY(plan.avoid)]
 
 proc planFromJson*(node: JsonNode): RoutingPlan =
-  ## Reads back a RECORDED plan (already resolved) from a replay.
-  result = repairPlan(node, defaultPlan())
+  ## Reads back a RECORDED plan (already resolved) from a replay or last_plan.
+  if node == nil or node.kind != JObject:
+    raise newException(GridlockError, "recorded plan must be a JSON object")
+  var stripped = newJObject()
+  for key in PlanKeys:
+    if node.hasKey(key):
+      stripped[key] = node[key]
+  result = parsePlanObject(stripped, defaultPlan())
   result.source =
     case node{"source"}.getStr("scripted")
     of "llm": psLlm

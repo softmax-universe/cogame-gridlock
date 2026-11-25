@@ -1,103 +1,138 @@
-## Tolerant parsing, repair, rune-safe truncation, and the derived router
-## coefficients.
+## Strict single-object JSON parsing, field validation, rune-safe truncation,
+## and the derived router coefficients.
 
 import std/[json, unicode, unittest]
 import support/helpers
 
-suite "tolerant parsing":
+suite "strict parsing":
   setup:
     let previous = defaultPlan()
 
-  test "a clean object parses":
+  test "a clean bare JSON object parses":
     let plan = parsePlan(fakeReplyPlan(65, 80), previous)
     check plan.congestionWeight == 65
     check plan.dispatch == 80
     check plan.priority == prNear
     check plan.source == psLlm
 
-  test "prose before the object is tolerated":
-    let text = "Sure! Here is my plan for this turn:\n" &
-      fakeReplyPlan(30, 90) & "\nLet me know if you want more."
-    let plan = parsePlan(text, previous)
-    check plan.congestionWeight == 30
-    check plan.dispatch == 90
+  test "a single outer markdown code fence (json-tagged or plain) parses":
+    let tagged = "```json\n" & fakeReplyPlan(12, 70) & "\n```"
+    let planA = parsePlan(tagged, previous)
+    check planA.congestionWeight == 12
+    check planA.dispatch == 70
+    let plain = "```\n" & fakeReplyPlan(24, 60) & "\n```"
+    let planB = parsePlan(plain, previous)
+    check planB.congestionWeight == 24
+    check planB.dispatch == 60
+    let upperTag = "```JSON\r\n" & fakeReplyPlan(36, 50) & "\r\n```"
+    let planC = parsePlan(upperTag, previous)
+    check planC.congestionWeight == 36
 
-  test "markdown fences are tolerated":
-    let text = "```json\n" & fakeReplyPlan(12, 70) & "\n```"
-    let plan = parsePlan(text, previous)
-    check plan.congestionWeight == 12
+  test "surrounding prose and extra objects are rejected":
+    expect GridlockError:
+      discard parsePlan("Sure! Here is my plan:\n" & fakeReplyPlan(30, 90), previous)
+    expect GridlockError:
+      discard parsePlan(fakeReplyPlan(30, 90) & "\nLet me know if you want more.", previous)
+    expect GridlockError:
+      discard parsePlan("Here:\n```json\n" & fakeReplyPlan(30, 90) & "\n```", previous)
+    expect GridlockError:
+      discard parsePlan("```json\n" & fakeReplyPlan(30, 90) & "\n```\nDone.", previous)
+    expect GridlockError:
+      discard parsePlan("""{"dispatch":50} {"dispatch":80}""", previous)
+    expect GridlockError:
+      discard parsePlan("```json\n{\"dispatch\":50}\n```\n```json\n{\"dispatch\":80}\n```", previous)
+    expect GridlockError:
+      discard parsePlan("```python\n{\"dispatch\":50}\n```", previous)
 
-  test "numeric strings and percentages are accepted":
-    let plan = parsePlan("""{"congestion_weight":"70%","patience":"25",
-      "dispatch":55.4,"spread":"0","priority":"FaR"}""", previous)
-    check plan.congestionWeight == 70
-    check plan.patience == 25
-    check plan.dispatch == 55
-    check plan.spread == 0
-    check plan.priority == prFar
+  test "legacy numeric coercions and out-of-range integers are rejected":
+    for bad in [
+      """{"congestion_weight":"70%"}""",
+      """{"patience":"25"}""",
+      """{"dispatch":55.4}""",
+      """{"spread":true}""",
+      """{"dispatch":null}""",
+      """{"congestion_weight":-1}""",
+      """{"patience":101}""",
+      """{"dispatch":300}""",
+      """{"spread":-40}""",
+    ]:
+      expect GridlockError:
+        discard parsePlan(bad, previous)
 
-  test "corridor as an object and as a district name":
-    let a = parsePlan("""{"congestion_weight":10,"corridor":{"bx":1,"by":1}}""",
-      previous)
-    check a.corridor == districtIndex(1, 1)
-    let b = parsePlan("""{"congestion_weight":10,"corridor":"centre"}""",
-      previous)
-    check b.corridor == districtIndex(1, 1)
-    let c = parsePlan("""{"congestion_weight":10,"corridor":"SE"}""", previous)
-    check c.corridor == districtIndex(2, 2)
-    let d = parsePlan("""{"congestion_weight":10,"corridor":"nowhere"}""",
-      previous)
-    check d.corridor == -1
+  test "legacy corridor/avoid formats, out-of-range districts, and wrong arity are rejected":
+    for bad in [
+      """{"congestion_weight":10,"corridor":{"bx":1,"by":1}}""",
+      """{"congestion_weight":10,"corridor":"centre"}""",
+      """{"congestion_weight":10,"corridor":"SE"}""",
+      """{"congestion_weight":10,"corridor":"nowhere"}""",
+      """{"dispatch":50,"corridor":[9,-4]}""",
+      """{"dispatch":50,"corridor":[1]}""",
+      """{"dispatch":50,"corridor":[1,1,1]}""",
+      """{"dispatch":50,"avoid":["1","1"]}""",
+    ]:
+      expect GridlockError:
+        discard parsePlan(bad, previous)
 
-  test "out-of-range districts clamp and wrong arity becomes null":
-    let a = parsePlan("""{"dispatch":50,"corridor":[9,-4]}""", previous)
-    check a.corridor == districtIndex(2, 0)
-    let b = parsePlan("""{"dispatch":50,"corridor":[1]}""", previous)
-    check b.corridor == -1
-    let c = parsePlan("""{"dispatch":50,"corridor":[1,1,1]}""", previous)
-    check c.corridor == -1
-
-  test "negative and 300-valued integers clamp":
-    let plan = parsePlan("""{"congestion_weight":-40,"patience":300,
-      "dispatch":-1,"spread":9999}""", previous)
-    check plan.congestionWeight == 0
-    check plan.patience == 100
-    check plan.dispatch == 0
-    check plan.spread == 100
+  test "valid corridor and avoid coordinates parse and explicit null clears previous":
+    let first = parsePlan("""{"dispatch":80,"corridor":[0,1],"avoid":[1,1]}""", previous)
+    check first.corridor == districtIndex(0, 1)
+    check first.avoid == districtIndex(1, 1)
+    let cleared = parsePlan("""{"corridor":null,"avoid":null}""", first)
+    check cleared.corridor == -1
+    check cleared.avoid == -1
 
   test "a plan may not prefer and shun the same district":
-    let plan = parsePlan("""{"dispatch":80,"corridor":[1,1],"avoid":[1,1]}""",
-      previous)
-    check plan.corridor == districtIndex(1, 1)
-    check plan.avoid == -1
-    check planIsLegal(plan)
+    expect GridlockError:
+      discard parsePlan("""{"dispatch":80,"corridor":[1,1],"avoid":[1,1]}""", previous)
 
-  test "garbage priority becomes fifo, missing priority becomes fifo":
-    check parsePlan("""{"dispatch":80,"priority":"sideways"}""",
-      previous).priority == prFifo
+  test "invalid priorities and priority aliases are rejected; missing priority defaults to fifo":
     check parsePlan("""{"dispatch":80}""", previous).priority == prFifo
+    check parsePlan("""{"dispatch":80,"priority":"near"}""", previous).priority == prNear
+    check parsePlan("""{"dispatch":80,"priority":"far"}""", previous).priority == prFar
+    check parsePlan("""{"dispatch":80,"priority":"fifo"}""", previous).priority == prFifo
+    for bad in [
+      """{"dispatch":80,"priority":"sideways"}""",
+      """{"dispatch":80,"priority":"nearest"}""",
+      """{"dispatch":80,"priority":"close"}""",
+      """{"dispatch":80,"priority":"furthest"}""",
+      """{"dispatch":80,"priority":"FaR"}""",
+      """{"dispatch":80,"priority":1}""",
+    ]:
+      expect GridlockError:
+        discard parsePlan(bad, previous)
 
-  test "missing integers fall back to the previous turn's plan":
+  test "unknown keys and non-string note/say are rejected":
+    expect GridlockError:
+      discard parsePlan("""{"dispatch":80,"throttle":50}""", previous)
+    expect GridlockError:
+      discard parsePlan("""{"dispatch":80,"note":123}""", previous)
+    expect GridlockError:
+      discard parsePlan("""{"dispatch":80,"say":true}""", previous)
+
+  test "omitted optional fields keep previous turn's plan and turn zero defaults":
     var earlier = defaultPlan()
     earlier.congestionWeight = 77
     earlier.patience = 12
     earlier.dispatch = 34
     earlier.spread = 56
+    earlier.corridor = districtIndex(2, 0)
     let plan = parsePlan("""{"note":"held"}""", earlier)
     check plan.congestionWeight == 77
     check plan.patience == 12
     check plan.dispatch == 34
     check plan.spread == 56
+    check plan.corridor == districtIndex(2, 0)
     check plan.note == "held"
 
-  test "turn zero defaults are the documented ones":
-    let plan = parsePlan("""{"note":"first"}""", defaultPlan())
-    check plan.congestionWeight == 40
-    check plan.patience == 50
-    check plan.dispatch == 100
-    check plan.spread == 40
+    let first = parsePlan("""{"note":"first"}""", defaultPlan())
+    check first.congestionWeight == 40
+    check first.patience == 50
+    check first.dispatch == 100
+    check first.spread == 40
 
   test "a reply with no plan keys at all is rejected":
+    expect GridlockError:
+      discard parsePlan("""{}""", previous)
     expect GridlockError:
       discard parsePlan("""{"weather":"fine"}""", previous)
     expect GridlockError:
@@ -117,7 +152,7 @@ suite "tolerant parsing":
       caught = error.msg
     check caught.len > 0
     check validateUtf8(caught) == -1
-    check caught.runeLen <= MaxErrorHeadRunes + 40
+    check caught.runeLen <= MaxErrorHeadRunes + 60
     check cleanLine(caught, MaxDetailRunes).runeLen <= MaxDetailRunes
     check validateUtf8(cleanLine(caught, MaxDetailRunes)) == -1
 
