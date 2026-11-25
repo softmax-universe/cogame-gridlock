@@ -462,7 +462,15 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
       if interruptionRequested(): break
       if decision.failedSeats.len > 0:
         let failedSlot = decision.failedSeats[0]
-        let publicDetail = "seat " & $failedSlot & " failed to supply a valid routing plan on turn " & $turn
+        var failureCause = ""
+        for record in decision.fallbacks:
+          if record.seat == failedSlot:
+            failureCause = $record.cause
+        let publicDetail =
+          if failureCause.len > 0:
+            "seat " & $failedSlot & " failed to supply a valid routing plan on turn " & $turn & " (" & failureCause & ")"
+          else:
+            "seat " & $failedSlot & " failed to supply a valid routing plan on turn " & $turn
         logLine("player decision failure: ", publicDetail)
         withLock stateLock:
           applyDecision(appState, decision, turn)
@@ -709,7 +717,7 @@ proc websocketHandler(websocket: WebSocket, event: WebSocketEvent,
             let source = payload["source"].getStr()
             if evidence.kind != JNull:
               appState.retainExternalAttempt(slot, id, evidence, completed = true)
-            elif source == "llm":
+            elif source == "llm" and payload{"action"}.kind != JNull:
               raise newException(GridlockError, "model action requires native evidence")
             if appState.stopping or interruptionRequested() or
                 appState.latestDecisions[slot] != id or

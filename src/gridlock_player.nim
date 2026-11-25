@@ -35,8 +35,8 @@ proc runDecision(call: PlayerCall) {.gcsafe.} =
   let client = newLlmClient(parseInt(getEnv("PLAYER_MAX_OUTPUT_TOKENS", "900")),
     getEnv("PLAYER_MODEL", "anthropic/claude-haiku-4.5"))
   if client.disabled:
-    source = "fallback"
     cause = "no_credentials"
+    echo "gridlock player: native model endpoint is not configured"
   else:
     proc beforeCall(evidence: DecisionAttempt) =
       let started = evidence.attemptEvidenceJson()
@@ -97,7 +97,8 @@ when isMainModule:
   if url.len == 0: quit("COWORLD_PLAYER_WS_URL is not set", 1)
   let prompt = clipRunes(getEnv("PLAYER_PROMPT").strip(), 4000)
   let scriptedName = getEnv("PLAYER_SCRIPTED").strip()
-  let scripted = prompt.strip().len == 0 or scriptedName.len > 0
+  let llmEnabled = getEnv("COWORLD_LLM_ENABLED").strip().toLowerAscii() in ["1", "true", "yes"]
+  let scripted = scriptedName.len > 0 or (prompt.strip().len == 0 and not llmEnabled)
   let policy = cleanLine(getEnv("PLAYER_POLICY_LABEL",
     if scripted: "scripted:" & (if scriptedName.len > 0: scriptedName else: "dispatcher")
     else: "prompt"), MaxPolicyRunes)

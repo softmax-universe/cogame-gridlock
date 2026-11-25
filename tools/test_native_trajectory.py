@@ -21,7 +21,10 @@ assert len(SOURCE_REVISION) == 40 and all(
 )
 for flow in (
     "accepted",
+    "fenced",
     "invalid",
+    "ambiguous",
+    "missing-endpoint",
     "sampled",
     "greedy-null",
     "greedy-tokens",
@@ -35,11 +38,14 @@ for flow in (
             slot = int(self.headers["X-Coworld-Player-Slot"])
             assert self.path == "/v1/messages" and slot in range(4)
             assert request["temperature"] == (1 if flow == "sampled" else 0)
-            text = (
-                "private-invalid-response"
-                if flow == "invalid" and slot == 0
-                else '{"dispatch":65}'
-            )
+            if flow == "invalid" and slot == 0:
+                text = "private-invalid-response"
+            elif flow == "ambiguous" and slot == 0:
+                text = '{"dispatch":65} {"dispatch":40}'
+            elif flow == "fenced":
+                text = '```json\n{"dispatch":65}\n```'
+            else:
+                text = '{"dispatch":65}'
             call_id = str(uuid.uuid4())
             body = {
                 "id": "msg_" + call_id,
@@ -131,7 +137,11 @@ for flow in (
             "COWORLD_EPISODE_ID": str(uuid.uuid4()),
             "COWORLD_GAME_VERSION": "native-fixture-v1",
             "COWORLD_SOURCE_REVISION": SOURCE_REVISION,
-            "COWORLD_LLM_ENDPOINT": f"http://127.0.0.1:{provider.server_port}",
+            "COWORLD_LLM_ENDPOINT": (
+                ""
+                if flow == "missing-endpoint"
+                else f"http://127.0.0.1:{provider.server_port}"
+            ),
             "COWORLD_LLM_MODEL": "fixture/requested",
             "COWORLD_LLM_TEMPERATURE": "1" if flow == "sampled" else "0",
             "PLAYER_PROMPT": "private-guidance-fixture",
@@ -175,7 +185,7 @@ for flow in (
             ]
             decisions, episode = events[:-1], events[-1]
             assert (output / "trajectory.jsonl").stat().st_mode & 0o777 == 0o600
-            if flow in {"invalid", "provider-error"}:
+            if flow in {"invalid", "ambiguous", "missing-endpoint", "provider-error"}:
                 assert episode["status"] == "truncated"
                 assert episode["participant_outcomes"] is None
                 assert all(
@@ -187,12 +197,18 @@ for flow in (
                 failure = json.loads((output / "player_failure.json").read_text())
                 assert failure["failed_policy_index"] == 0
                 assert "failed to supply a valid routing plan" in failure["message"]
+                if flow == "missing-endpoint":
+                    assert "no_credentials" in failure["message"]
+                    assert len(calls) == 0
+                    expected_attempts = 1
+                else:
+                    expected_attempts = 2
                 assert any(
                     d["seat"] == "0"
                     and d["action_status"] == "rejected"
                     and d["executed_action"] is None
                     and d["selected_attempt_id"] is None
-                    and len(d["attempts"]) == 2
+                    and len(d["attempts"]) == expected_attempts
                     for d in decisions
                 )
                 seen = set()

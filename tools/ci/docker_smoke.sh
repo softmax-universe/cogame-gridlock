@@ -38,8 +38,7 @@
 #                              job loads it in a real browser -- that is the
 #                              only replay in CI that is known to be readable
 #                              by this game's own viewer.
-#   Native model smoke requires COWORLD_LLM_ENDPOINT in SMOKE_EXTRA_ENV.
-#   With no native endpoint the prompt player uses explicit dispatcher fallback.
+#   Offline certification uses explicit scripted player IDs; model players require COWORLD_LLM_ENDPOINT.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
