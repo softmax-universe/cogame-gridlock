@@ -16,9 +16,11 @@ connection to a seat that already holds one, or admission after gameplay starts,
  "policy": "<free label, <= 48 runes>", "prompt": "<private policy, <= 4000 runes>"}
 ```
 
-A missing registration plays `dispatcher`. A scripted player names its baseline. A prompt or external
-player registers its private prompt for authoritative request validation. Credentials remain inside the player.
-Registration freezes before gameplay; a disconnected seat plays dispatcher.
+Every seat must connect and register explicitly before gameplay starts. A scripted player names its
+explicit baseline (`"dispatcher"` or `"beeline"`). A prompt or external player registers its private
+prompt for authoritative request validation. Credentials remain inside the player. Registration
+freezes before gameplay; a missing, unregistered, or disconnected seat is never substituted with
+`dispatcher` and instead fails the episode unscored.
 
 ### Welcome
 

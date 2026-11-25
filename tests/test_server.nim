@@ -97,13 +97,34 @@ suite "auth and registration":
       seats.applyRegistration(0, %*{"type": "register", "kind": "prompt",
         "scripted": newJNull(), "policy": "valid", "prompt": {"private": "sentinel"}})
     check not seats.seats[0].registered
-    check seats.seats[0].kind == pkScripted
-    check effectiveScriptNow(seats.seats[0]) == skDispatcher
+    check seats.seats[0].kind == pkUnregistered
+    check effectiveScript(seats.seats[0]) == skNone
     expect GridlockError:
       seats.applyRegistration(0, %*{"type": "register", "kind": "prompt",
         "scripted": newJNull(), "policy": "", "prompt": "private"})
     check not seats.seats[0].registered
-    check seats.seats[0].kind == pkScripted
+    check seats.seats[0].kind == pkUnregistered
+    check effectiveScript(seats.seats[0]) == skNone
+
+  test "unregistered or disconnected seats never acquire a scripted dispatcher":
+    var seats = initRoster(@["t0", "t1", "t2", "t3"])
+    check seats.seats[0].kind == pkUnregistered
+    check policyKindOf(seats.seats[0]) == "unregistered"
+    check effectiveScript(seats.seats[0]) == skNone
+    seats.applyRegistration(0, %*{"type": "register", "kind": "prompt",
+      "scripted": newJNull(), "policy": "native-model", "prompt": "drive"})
+    seats.seats[0].everConnected = true
+    seats.seats[0].connected = false
+    check effectiveScript(seats.seats[0]) == skNone
+    expect GridlockError:
+      seats.applyRegistration(1, %*{"type": "register", "kind": "scripted",
+        "scripted": newJNull(), "policy": "scripted:dispatcher", "prompt": ""})
+    check not seats.seats[1].registered
+    seats.applyRegistration(1, %*{"type": "register", "kind": "scripted",
+      "scripted": "dispatcher", "policy": "scripted:dispatcher", "prompt": ""})
+    check seats.seats[1].registered
+    check effectiveScript(seats.seats[1]) == skDispatcher
+    check not serverSource.contains("effectiveScriptNow")
 
   test "the policy label is rune-capped at 48":
     var seats = initRoster(@["t0", "t1", "t2", "t3"])

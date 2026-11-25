@@ -195,6 +195,7 @@ type
     fcTransportError = "transport_error"
     fcNoCredentials = "no_credentials"
     fcBudgetGuard = "budget_guard"
+    fcDisconnected = "disconnected"
 
   Pcg32* = object
     state*: uint64

@@ -254,6 +254,7 @@ proc resultsJson*(sim: Sim): JsonNode =
   ## coworld_manifest_template.json's results_schema and
   ## tests/test_manifest.nim in the same commit.
   let faulted = sim.reason == "fault"
+  let unscored = sim.reason != "complete"
   var names = newJArray()
   var aliases = newJArray()
   var colours = newJArray()
@@ -280,7 +281,7 @@ proc resultsJson*(sim: Sim): JsonNode =
     policyKinds.add(%sim.policyKinds[seat])
     let count = if faulted: 0 else: sim.delivered[seat]
     deliveredRaw.add(count)
-    scores.add(%float(count))
+    scores.add(if unscored: newJNull() else: %float(count))
     delivered.add(%count)
     ordersCreated.add(%sim.ordersCreated[seat])
     backlogFinal.add(%sim.backlog[seat].len)
@@ -302,10 +303,12 @@ proc resultsJson*(sim: Sim): JsonNode =
   for value in deliveredRaw:
     total += value
   var win = newJArray()
-  let flags = winFlags(deliveredRaw)
+  let flags =
+    if unscored: @[false, false, false, false]
+    else: winFlags(deliveredRaw)
   for flag in flags:
     win.add(%flag)
-  let winnerIndex = if faulted: -1 else: winnerOf(deliveredRaw)
+  let winnerIndex = if unscored: -1 else: winnerOf(deliveredRaw)
   result = %*{
     "names": names,
     "aliases": aliases,

@@ -41,7 +41,9 @@ proc snapshots(): array[Seats, SeatSnapshot] =
       view: %*{"seat": seat},
       baseline: BaselineInput(),
       previous: defaultPlan(),
-      scripted: (if seat < 2: skNone else: skDispatcher))
+      scripted: (if seat < 2: skNone else: skDispatcher),
+      connected: true,
+      registered: true)
 
 suite "ordinary player decision exchange":
   test "simultaneous private views, retry, and strict plan validation":
@@ -190,3 +192,37 @@ suite "ordinary exchange retries":
       check decision.attempts[seat].len == 2
       check decision.attempts[seat][0].rejectionReason.get() == "player plan timed out"
       check decision.attempts[seat][1].accepted
+
+  test "a disconnected or unregistered seat fails immediately with zero exchange calls":
+    proc unused(requests: seq[JsonNode], timeoutMs: int): seq[string] {.gcsafe.} =
+      doAssert false, "exchange must not be called when a seat is absent or disconnected"
+    var seats = snapshots()
+    seats[0].connected = false
+    let decision = decidePlayers(seats, 1, false, 22.0, unused)
+    check decision.failedSeats == @[0]
+    check decision.fallbacks.len == 1
+    check decision.fallbacks[0].cause == fcDisconnected
+    check decision.plans[0].source != psFallback
+    check decision.selectedAttemptIds[0].isNone
+    check decision.attempts[0].len == 1
+    check not decision.attempts[0][0].accepted
+
+  test "a mid-exchange disconnect fails without retry or fallback":
+    var exchanges = 0
+    proc dropped(requests: seq[JsonNode], timeoutMs: int): seq[string] {.gcsafe.} =
+      inc exchanges
+      for request in requests:
+        if request["slot"].getInt() == 0:
+          result.add($(%*{"type": "disconnected", "training_attempt": newJNull()}))
+        else:
+          result.add($(%*{"type": "action", "protocol": PlayerProtocol,
+            "decision_id": request["decision_id"], "source": "llm",
+            "action": {"dispatch": 60}}))
+    let decision = decidePlayers(snapshots(), 1, false, 22.0, dropped)
+    check exchanges == 1
+    check decision.failedSeats == @[0]
+    check decision.fallbacks.len == 1
+    check decision.fallbacks[0].cause == fcDisconnected
+    check decision.selectedAttemptIds[0].isNone
+    check decision.attempts[0].len == 1
+    check not decision.attempts[0][0].accepted

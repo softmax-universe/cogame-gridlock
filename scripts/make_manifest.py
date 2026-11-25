@@ -65,7 +65,7 @@ config_props["jamThreshold"] = num("Lane occupancy that raises a jam event.", 2,
 config_props["turnBudgetSeconds"] = num("Wall-clock ceiling for one decision turn.", 1, 120, 22, "number")
 config_props["minTurnSpacingSeconds"] = num("Floor between model decision turns; at most four players call the hosted sidecar per turn, against its 30 requests/minute episode cap.", 0, 60, 10, "number")
 config_props["wallClockBudgetSeconds"] = num("Engine hard stop. Must stay inside 60% of the platform episode timeout.", 30, 720, 660, "number")
-config_props["playerConnectTimeoutSeconds"] = num("How long the game waits for seats before starting; a no-show plays the dispatcher baseline.", 0, 600, 90, "number")
+config_props["playerConnectTimeoutSeconds"] = num("How long the game waits for all seats to connect and register before failing unscored.", 0, 600, 90, "number")
 config_props["episodeTimeoutSeconds"] = num("Platform kill time assumed when the environment is silent (the game container does not receive COWORLD_TIMEOUT_SECONDS).", 60, 6000, 1200)
 config_props["cityPath"] = {
     "description": "Which authored city to load from data/<name>.cityspec.json.",
@@ -81,7 +81,7 @@ results_props["aliases"] = arr("The depot alias each seat played under this epis
 results_props["colours"] = arr("Each seat's depot colour.", {"type": "string"})
 results_props["depots"] = arr("Each seat's depot node as [ix, iy].", {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer"}})
 results_props["policy_kinds"] = arr("llm or scripted, per seat.", {"type": "string"})
-results_props["scores"] = arr("Parcels this seat's vans delivered. Higher is better; a raw count, not a share.", {"type": "number", "minimum": 0})
+results_props["scores"] = arr("Parcels this seat's vans delivered on a completed episode, or null when unfinished/unscored.", {"type": ["number", "null"], "minimum": 0})
 results_props["win"] = arr("True for the unique maximum, false otherwise.", {"type": "boolean"})
 results_props["delivered"] = arr("Same as scores, as an integer.", {"type": "integer", "minimum": 0})
 results_props["total_delivered"] = {"description": "Sum of the four delivery counts: the city's whole output, and the thing the commons destroys.", "type": "integer", "minimum": 0}
@@ -96,10 +96,10 @@ results_props["jam_index_peak"] = {"description": "Worst city jam index reached.
 results_props["gridlock_events"] = {"description": "Districts that locked up, counted.", "type": "integer", "minimum": 0}
 results_props["turns_llm"] = arr("Turns this seat's plan came from the model.", {"type": "integer", "minimum": 0})
 results_props["fallback_turns"] = arr("Turns this seat played the scripted fallback after the model failed twice.", {"type": "integer", "minimum": 0})
-results_props["fallback_causes"] = arr("Per-cause fallback counts.", {
+results_props["fallback_causes"] = arr("Per-cause failure counts.", {
     "type": "object", "additionalProperties": False,
     "properties": {c: {"type": "integer", "minimum": 0} for c in
-                   ["timeout", "parse_error", "transport_error", "no_credentials", "budget_guard"]}})
+                   ["timeout", "parse_error", "transport_error", "no_credentials", "budget_guard", "disconnected"]}})
 results_props["reason"] = {"description": "complete, deadline or fault.", "type": "string", "enum": ["complete", "deadline", "fault"]}
 results_props["end_rule"] = {"description": "The detail behind reason.", "type": "string", "enum": ["full_time", "wall_clock", "sim_fault", "host_error"]}
 results_props["winner"] = {"description": "Slot index of the unique maximum, or null on a tie.", "type": ["integer", "null"], "minimum": 0, "maximum": 3}

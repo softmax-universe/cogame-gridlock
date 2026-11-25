@@ -64,7 +64,8 @@ class ModelHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def main(game_bin, player_bin):
+def play(game_bin, player_bin, scenario):
+    ModelHandler.calls.clear()
     model_port = free_port()
     game_port = free_port()
     server = http.server.ThreadingHTTPServer(("127.0.0.1", model_port), ModelHandler)
@@ -80,8 +81,8 @@ def main(game_bin, player_bin):
             "seed": 42,
             "episodeTicks": 480,
             "turnTicks": 240,
-            "minTurnSpacingSeconds": 0,
-            "playerConnectTimeoutSeconds": 5,
+            "minTurnSpacingSeconds": 2 if scenario == "disconnect" else 0,
+            "playerConnectTimeoutSeconds": 1 if scenario == "missing" else 5,
             "wallClockBudgetSeconds": 90,
             "episodeTimeoutSeconds": 180,
             "cityPath": "gridcity",
@@ -103,6 +104,7 @@ def main(game_bin, player_bin):
             "COGAME_CONFIG_URI": f"file://{directory / 'config.json'}",
             "COGAME_RESULTS_URI": f"file://{directory / 'results.json'}",
             "COGAME_SAVE_REPLAY_URI": f"file://{directory / 'replay.json'}",
+            "COGAME_PLAYER_FAILURE_URI": (directory / "player-failure.json").as_uri(),
         }
         processes = []
         thread.start()
@@ -125,7 +127,7 @@ def main(game_bin, player_bin):
                 assert processes[0].poll() is None, "game exited before readiness"
                 time.sleep(0.02)
             assert ready, "game socket never opened"
-            for slot in range(4):
+            for slot in range(0 if scenario == "missing" else 4):
                 player_env = env | {
                     "COWORLD_PLAYER_WS_URL": (f"ws://127.0.0.1:{game_port}/player?slot={slot}&token=token-{slot}")
                 }
@@ -144,6 +146,26 @@ def main(game_bin, player_bin):
                         stderr=subprocess.STDOUT,
                     )
                 )
+            if scenario == "disconnect":
+                deadline = time.monotonic() + 25
+                while not ModelHandler.calls and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert ModelHandler.calls, "model seat never received a decision"
+                processes[1].terminate()
+                processes[1].wait(timeout=5)
+            if scenario in ("missing", "disconnect"):
+                game_log, _ = processes[0].communicate(timeout=40)
+                assert (directory / "player-failure.json").exists(), game_log.decode(errors="replace")
+                results_path = directory / "results.json"
+                if results_path.exists():
+                    results = json.loads(results_path.read_text())
+                    assert results["reason"] != "complete", game_log
+                    assert results["scores"] == [None] * 4, results
+                    assert results["winner"] is None and not any(results["win"]), results
+                if scenario == "missing":
+                    assert not ModelHandler.calls
+                print(f"Gridlock {scenario} roster was unscored")
+                return
             outputs = []
             for process in processes:
                 output, _ = process.communicate(timeout=75)
@@ -172,4 +194,5 @@ def main(game_bin, player_bin):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    for scenario in ("complete", "missing", "disconnect"):
+        play(sys.argv[1], sys.argv[2], scenario)
