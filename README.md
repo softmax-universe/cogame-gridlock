@@ -67,8 +67,11 @@ One image, two entrypoints, and the seat kind is chosen by env on the **player**
 | `PLAYER_SCRIPTED=beeline` | pure greedy shortest path at full throttle (the weak baseline, and the villain of the idea) |
 
 With no policy environment variable, the seat plays `dispatcher`. The game sends each model player
-a private decision, validates and repairs its plan, and records the resolved stream. An absent native endpoint produces
-an explicit fallback to `dispatcher`, so offline certification still completes.
+a private decision, strictly validates its plan (accepting a single bare or fenced JSON object and
+valid defaults for omitted optional fields), and records the resolved stream. Rejected model replies
+receive one retry and then surface an ordinary player failure rather than silently substituting a
+scripted move. An absent native endpoint (`no_credentials`) produces an explicit fallback to
+`dispatcher`, so offline certification still completes.
 Prompt players use `COWORLD_LLM_ENDPOINT` and `COWORLD_LLM_MODEL`; provider credentials stay in the platform-owned sidecar.
 External players register `kind: "external"` and submit complete plans over the same private decision interface.
 

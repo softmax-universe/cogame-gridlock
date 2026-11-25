@@ -58,6 +58,7 @@ type
     attempts: seq[DecisionAttempt]
     selected: Option[string]
     action: JsonNode
+    status: ActionStatus
     terminal: bool
     fallback: Option[string]
 
@@ -348,7 +349,7 @@ proc finishEpisode(runtimeConfig: RuntimeConfig, episodeDeadline: MonoTime, fail
               attempt.rejectionReason = rejection
         appState.trajectory.recordDecision(pending.id, pending.seat,
           promptObservation(pending.observation, appState.selection, attempts), attempts, pending.selected, pending.action,
-          (if pending.selected.isSome: asAccepted else: asFallback), terminal = pending.terminal, fallbackOrigin = pending.fallback)
+          pending.status, terminal = pending.terminal, fallbackOrigin = pending.fallback)
       for id, evidence in appState.startedAttempts:
         var attempt = readAttemptEvidence(evidence)
         if attempt.attemptId notin represented:
@@ -459,6 +460,31 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
         cfg.turnBudgetSeconds, exchangeDecisions)
 
       if interruptionRequested(): break
+      if decision.failedSeats.len > 0:
+        let failedSlot = decision.failedSeats[0]
+        let publicDetail = "seat " & $failedSlot & " failed to supply a valid routing plan on turn " & $turn
+        logLine("player decision failure: ", publicDetail)
+        withLock stateLock:
+          applyDecision(appState, decision, turn)
+          let startTick = appState.game.tick
+          if trajectoryUri.len > 0:
+            for slot in 0 ..< Seats:
+              var attempts = decision.attempts[slot]
+              let failedHere = slot in decision.failedSeats
+              if not failedHere:
+                for attempt in attempts.mitems:
+                  if attempt.accepted:
+                    attempt.accepted = false
+                    attempt.rejectionReason = some("turn aborted after seat " & $failedSlot & " failed")
+              appState.records.add(PendingRecord(id: $startTick & "-" & $slot,
+                seat: $slot, observation: requests[slot].view, attempts: attempts,
+                selected: none(string), action: newJNull(),
+                status: (if failedHere: asRejected else: asMissing),
+                terminal: true, fallback: none(string)))
+          endEpisode(appState.game, "fault", "host_error", publicDetail)
+        declarePlayerFailure(failedSlot, publicDetail,
+          min(episodeDeadline, getMonoTime() + initDuration(seconds = 5)))
+        break
       var failure = ""
       withLock stateLock:
         applyDecision(appState, decision, turn)
@@ -479,6 +505,7 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
             appState.records.add(PendingRecord(id: $startTick & "-" & $slot,
               seat: $slot, observation: requests[slot].view, attempts: attempts,
               selected: selectedApplied, action: installed,
+              status: (if selectedApplied.isSome: asAccepted else: asFallback),
               terminal: appState.game.tick >= cfg.episodeTicks,
               fallback: (if selectedApplied.isSome: none(string)
                 else: some("engine-" & $appState.game.plans[slot].source))))

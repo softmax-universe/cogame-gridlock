@@ -44,10 +44,11 @@ proc snapshots(): array[Seats, SeatSnapshot] =
       scripted: (if seat < 2: skNone else: skDispatcher))
 
 suite "ordinary player decision exchange":
-  test "simultaneous private views, retry, and game-owned plan repair":
+  test "simultaneous private views, retry, and strict plan validation":
     calls = 0
     let decision = decidePlayers(snapshots(), 0, false, 22.0, mixedReplies)
     check calls == 2
+    check decision.failedSeats.len == 0
     check decision.plans[0].source == psLlm
     check decision.plans[0].dispatch == 70
     check decision.plans[1].source == psLlm
@@ -64,8 +65,9 @@ suite "ordinary player decision exchange":
     check decision.attempts[1][1].parsedAction == planJson(decision.plans[1])
     check decision.selectedAttemptIds[1].get() == decision.attempts[1][1].attemptId
 
-  test "explicit missing credentials use the ordinary fallback":
+  test "explicit missing credentials use the offline certification fallback":
     let decision = decidePlayers(snapshots(), 0, false, 22.0, noCredentials)
+    check decision.failedSeats.len == 0
     check decision.plans[0].source == psFallback
     check decision.plans[1].source == psFallback
     check decision.fallbacks.len == 2
@@ -73,6 +75,14 @@ suite "ordinary player decision exchange":
     check decision.selectedAttemptIds[0].isNone
     check decision.attempts[0].len == 1
     check not decision.attempts[0][0].accepted
+
+  test "non-no_credentials fallback source and string action shims are rejected":
+    let nonCredFallback = $(%*{"type": "action", "protocol": PlayerProtocol,
+      "decision_id": "1", "source": "fallback", "cause": "transport_error"})
+    check playerProposal(nonCredFallback, "1", 0, snapshots()[0]).kind == pkRejected
+    let stringAction = $(%*{"type": "action", "protocol": PlayerProtocol,
+      "decision_id": "1", "source": "llm", "action": "{\"dispatch\":70}"})
+    check playerProposal(stringAction, "1", 0, snapshots()[0]).kind == pkRejected
 
   test "external origins cannot mint server-owned teacher or human labels":
     for origin in [aoTeacher, aoHuman]:
@@ -104,9 +114,26 @@ suite "ordinary player decision exchange":
     check proposal.evidence.parsedAction["dispatch"].getInt() == 40
     check proposal.plan.dispatch == 70
 
+  test "fenced model response matches its submitted action object":
+    var evidence = newDecisionAttempt("fenced", "model-policy", aoModel)
+    evidence.response = %"```json\n{\"dispatch\":70}\n```"
+    evidence.model = some("fixture-model")
+    evidence.rawResponse = %($(%*{"model": "fixture-model", "content": [
+      {"type": "text", "text": evidence.response}]}))
+    evidence.responseComplete = some(true)
+    evidence.responseReaderJoined = some(true)
+    evidence.httpStatus = some(200)
+    let raw = $(%*{"type": "action", "protocol": PlayerProtocol, "decision_id": "1",
+      "source": "llm", "action": {"dispatch": 70},
+      "training_attempt": evidence.attemptEvidenceJson()})
+    let proposal = playerProposal(raw, "1", 0, snapshots()[0])
+    check proposal.kind == pkAccepted
+    check proposal.evidence.accepted
+    check proposal.plan.dispatch == 70
+
 
 suite "ordinary exchange retries":
-  test "two invalid replies retain both attempts before dispatcher fallback":
+  test "two invalid replies surface seat failure instead of substituting dispatcher":
     var exchanges = 0
     var seats = snapshots()
     for seat in 0 ..< Seats: seats[seat].scripted = skNone
@@ -116,9 +143,10 @@ suite "ordinary exchange retries":
     let decision = decidePlayers(seats, 0, false, 22.0, invalid)
     check exchanges == 2
     check decision.fallbacks.len == Seats * 2
+    check decision.failedSeats == @[0, 1, 2, 3]
+    check decision.failureDetail.len > 0
     for seat in 0 ..< Seats:
-      check decision.plans[seat].source == psFallback
-      check planIsLegal(decision.plans[seat])
+      check decision.plans[seat].source != psFallback
       check decision.attempts[seat].len == 2
       check decision.selectedAttemptIds[seat].isNone
 
@@ -137,6 +165,7 @@ suite "ordinary exchange retries":
             "action": {"congestion_weight": 55, "patience": 75}}))
     let decision = decidePlayers(seats, 0, false, 22.0, retry)
     check exchanges == 2
+    check decision.failedSeats.len == 0
     check decision.fallbacks.len == Seats
     for seat in 0 ..< Seats:
       check decision.plans[seat].source == psLlm

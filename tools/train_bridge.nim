@@ -110,19 +110,26 @@ proc step(command: JsonNode): JsonNode =
   var consumed = false
   var action: JsonNode
   if languageMode:
-    let frame = %*{"type": "action", "protocol": PlayerProtocol, "decision_id": $decisionId,
-      "source": "llm", "action": command["response"]}
-    let proposal = playerProposal($frame, $decisionId, seat,
-      SeatSnapshot(view: privateView, baseline: baselineInput(privateView),
-        previous: game.plans[seat]))
-    if proposal.kind == pkRejected:
+    var parsedOk = false
+    try:
+      let candidate = parsePlan(command["response"].getStr(), game.plans[seat])
+      let frame = %*{"type": "action", "protocol": PlayerProtocol, "decision_id": $decisionId,
+        "source": "llm", "action": planJson(candidate)}
+      let proposal = playerProposal($frame, $decisionId, seat,
+        SeatSnapshot(view: privateView, baseline: baselineInput(privateView),
+          previous: game.plans[seat]))
+      if proposal.kind == pkAccepted:
+        plan = proposal.plan
+        parsedOk = true
+    except CatchableError:
+      parsedOk = false
+    if not parsedOk:
       inc rejectedAttempts
       if rejectedAttempts == 1:
         return %*{"kind": "rejected", "reason": "invalid private player reply",
           "observation": currentDecision(retry = true)}
       plan = dispatcherPlan(baselineInput(privateView))
       consumed = true
-    else: plan = proposal.plan
     action = planJson(plan)
   else:
     action = parseJson(command["response"].getStr())

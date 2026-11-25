@@ -29,12 +29,14 @@ proc runDecision(call: PlayerCall) {.gcsafe.} =
   let observation = parseJson(call.observation)
   var action = newJNull()
   var source = "llm"
+  var cause = ""
   var attempt = newJNull()
   var failure = ""
   let client = newLlmClient(parseInt(getEnv("PLAYER_MAX_OUTPUT_TOKENS", "900")),
     getEnv("PLAYER_MODEL", "anthropic/claude-haiku-4.5"))
   if client.disabled:
     source = "fallback"
+    cause = "no_credentials"
   else:
     proc beforeCall(evidence: DecisionAttempt) =
       let started = evidence.attemptEvidenceJson()
@@ -55,15 +57,17 @@ proc runDecision(call: PlayerCall) {.gcsafe.} =
     except CatchableError as error:
       failure = error.msg
       echo "gridlock player: native policy call failed"
-      source = "fallback"
       client.lastAttempt.rejectionReason = some(failure)
     attempt = client.lastAttempt.attemptEvidenceJson()
     {.gcsafe.}:
       withLock evidenceLock: workerEvidence = $attempt
   if not interruptionRequested():
-    discard call.socket[].sendNativeText($(%*{"type": "action", "decision_id": call.decisionId,
+    var frame = %*{"type": "action", "decision_id": call.decisionId,
       "protocol": PlayerProtocol, "action": action, "source": source,
-      "cause": "transport_error", "training_attempt": attempt}), call.deadline)
+      "training_attempt": attempt}
+    if cause.len > 0:
+      frame["cause"] = %cause
+    discard call.socket[].sendNativeText($frame, call.deadline)
 
 proc stopAndAcknowledge(socket: NativeWebSocket, decisionId, stopId: JsonNode,
     cleanupDeadline: MonoTime): bool =

@@ -31,8 +31,11 @@ Registration freezes before gameplay; a disconnected seat plays dispatcher.
 
 At each routing turn the game sends all model seats their private views before the shared 14-second
 first deadline. It retries invalid or missing actions once under a six-second deadline. The game
-repairs accepted plans against the previous plan and records the resolved result. The player sends
-one complete routing plan in the normal action envelope, or an explicit fallback cause.
+validates submitted plans against the schema (filling omitted optional fields from their documented
+defaults) and records the resolved result. The player sends one routing plan object in the normal
+action envelope. If a model seat still fails to supply a valid plan after its retry, the game does
+not substitute a scripted move: it records the rejected attempt evidence, reports the failing seat
+to `COGAME_PLAYER_FAILURE_URI`, and terminates the episode cleanly.
 
 ```json
 {"type": "decision", "protocol": "gridlock.player.v3", "decision_id": "7-0-1",
@@ -51,7 +54,9 @@ Before HTTP starts, it sends `attempt_started` with the issued `decision_id` and
 `training_attempt`; response fields are null. Finished evidence retains actual body/header bytes,
 status, call identity, sampling metadata, and reader join. Received facts cannot be rewritten.
 A selected model response must match its received native body and parse to the submitted action.
-Fallback replies set `source: "fallback"`; the engine retains evidence and applies dispatcher after its retry budget.
+An absent native endpoint (`no_credentials`, used by offline certification) may send
+`source: "fallback"` with `cause: "no_credentials"`; model parse, transport, or timeout failures
+are rejected and never silently substituted with a scripted move.
 
 Each private decision also carries `prompt_config` (`promptVariant`, `promptSeed`)
 and `prompt_selection` (bank, resolved variant, requested selection, and seed).
@@ -135,23 +140,24 @@ seat; the episode seed; and the future.
  "note": "<= 140 runes", "say": "<= 32 runes"}
 ```
 
-| field | type | legal | repair |
+| field | type | legal | default when omitted |
 |---|---|---|---|
-| `congestion_weight` | int | 0…100 | missing/non-numeric → previous turn's value (40 on turn 0); out of range → clamped |
-| `patience` | int | 0…100 | as above, default 50 |
-| `dispatch` | int | 0…100 | as above, default 100 |
-| `spread` | int | 0…100 | as above, default 40 |
-| `corridor` | `[bx,by]` or null | 0…2 each | out of range → clamped; wrong shape → null |
-| `avoid` | `[bx,by]` or null | 0…2 each | as `corridor`; forced null when it equals `corridor` |
-| `priority` | enum | `near` \| `far` \| `fifo` (case-insensitive) | anything else → `fifo` |
-| `note` | string | ≤ 140 runes | truncated on a RUNE boundary |
-| `say` | string | ≤ 32 runes | truncated on a RUNE boundary |
+| `congestion_weight` | int | 0…100 | previous turn's value (40 on turn 0) |
+| `patience` | int | 0…100 | previous turn's value (50 on turn 0) |
+| `dispatch` | int | 0…100 | previous turn's value (100 on turn 0) |
+| `spread` | int | 0…100 | previous turn's value (40 on turn 0) |
+| `corridor` | `[bx,by]` or `null` | `bx, by` ints in 0…2 | previous turn's value (`null` on turn 0); explicit `null` clears |
+| `avoid` | `[bx,by]` or `null` | `bx, by` ints in 0…2, must differ from `corridor` | previous turn's value (`null` on turn 0); explicit `null` clears |
+| `priority` | enum | `"near"` \| `"far"` \| `"fifo"` | `"fifo"` |
+| `note` | string | ≤ 140 runes | `""` (truncated on a RUNE boundary) |
+| `say` | string | ≤ 32 runes | `""` (truncated on a RUNE boundary) |
 
-Parsing is tolerant: markdown fences are stripped, the outermost balanced `{…}` is taken when the
-model prefixed prose, numeric strings and `"70%"` are accepted for any integer, and
-`corridor`/`avoid` are accepted as `{"bx":…,"by":…}` or as a district name. Only when no object
-carrying at least one recognised plan key can be recovered does the retry — and then the scripted
-fallback — fire. **The resolved, repaired, clamped plan is what is installed and what is recorded.**
+Model replies must contain **exactly one JSON object**, either bare or inside a single ordinary
+outer Markdown code fence (` ```json ` or ` ``` `). Surrounding prose, extra JSON objects, unknown
+keys, legacy field formats (strings/floats/booleans for integers, district names or `{bx,by}`
+objects for `corridor`/`avoid`, priority aliases), out-of-range values, and setting `corridor` and
+`avoid` to the same district are all rejected rather than silently repaired or clamped. **The
+resolved plan is what is installed and what is recorded.**
 
 Truncation is on **rune** boundaries, never bytes: a byte-truncated multi-byte character renders in
 a browser and fails a strict UTF-8 JSON parser.
