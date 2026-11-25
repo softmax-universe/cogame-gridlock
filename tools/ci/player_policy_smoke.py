@@ -193,6 +193,33 @@ def play(game_bin, player_bin, scenario):
             assert not thread.is_alive()
 
 
+def certify(manifest, docker_host):
+    from coworld.certifier import certify_coworld
+    from coworld.runner.runner import run_coworld_episode
+
+    with http.server.ThreadingHTTPServer(("0.0.0.0", 0), ModelHandler) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        endpoint = f"http://{docker_host}:{server.server_port}"
+
+        def run_roster(job, artifacts, timeout):
+            model_slots = {
+                slot: {"COWORLD_LLM_ENDPOINT": endpoint}
+                for slot, player in enumerate(job.players)
+                if player.env.get("COWORLD_LLM_ENABLED") == "true"
+            }
+            run_coworld_episode(
+                job, artifacts, timeout_seconds=timeout,
+                player_secret_env=model_slots, require_websocket_pong=True,
+            )
+
+        result = certify_coworld(Path(manifest), timeout_seconds=300, episode_runner=run_roster)
+        print(f"Certified {len(result.step_results)} steps; artifacts in {result.artifacts.workspace}")
+        server.shutdown()
+
+
 if __name__ == "__main__":
-    for scenario in ("complete", "missing", "disconnect"):
-        play(sys.argv[1], sys.argv[2], scenario)
+    if sys.argv[1] == "--certify":
+        certify(*sys.argv[2:])
+    else:
+        for scenario in ("complete", "missing", "disconnect"):
+            play(sys.argv[1], sys.argv[2], scenario)
