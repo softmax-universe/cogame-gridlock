@@ -23,8 +23,8 @@ type
     temperature*: float
     lastAttempt*: DecisionAttempt
 
-proc newLlmClient*(maxOutputTokens: int, model: string): LlmClient =
-  result = LlmClient(model: getEnv("COWORLD_LLM_MODEL", model),
+proc newLlmClient*(maxOutputTokens: int, model = ""): LlmClient =
+  result = LlmClient(model: getEnv("COWORLD_LLM_MODEL", model).strip(),
     maxOutputTokens: maxOutputTokens,
     temperature: parseFloat(getEnv("COWORLD_LLM_TEMPERATURE", "0.4")),
     sidecarEndpoint: getEnv("COWORLD_LLM_ENDPOINT").strip().strip(chars = {'/'}, leading = false))
@@ -33,9 +33,7 @@ proc newLlmClient*(maxOutputTokens: int, model: string): LlmClient =
     raise newException(GridlockError, "COWORLD_LLM_TEMPERATURE must be finite and in [0, 1]")
   if result.maxOutputTokens <= 0:
     raise newException(GridlockError, "PLAYER_MAX_OUTPUT_TOKENS must be positive")
-  if result.model.len == 0:
-    raise newException(GridlockError, "native model must not be empty")
-  result.disabled = result.sidecarEndpoint.len == 0
+  result.disabled = result.sidecarEndpoint.len == 0 or result.model.len == 0
 
 proc userMessage*(request: SeatRequest, retryHint: bool): string =
   result = clipRunes(strutils.strip(request.prompt), 4000)
@@ -53,6 +51,8 @@ proc requestFor(client: LlmClient, system, user: string, slot: int):
     tuple[url: string, headers: HttpHeaders, body: string] =
   if slot < 0 or slot >= Seats:
     raise newException(GridlockError, "native player slot is outside the game seats")
+  if client.model.len == 0:
+    raise newException(GridlockError, "native model must not be empty")
   let body = %*{"max_tokens": client.maxOutputTokens,
     "temperature": client.temperature, "model": client.model,
     "system": system, "messages": [{"role": "user", "content": user}]}

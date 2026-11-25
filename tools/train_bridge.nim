@@ -107,7 +107,6 @@ proc step(command: JsonNode): JsonNode =
     return %*{"kind": "rejected", "reason": "stale decision", "observation": currentDecision()}
   let privateView = buildView(game, seat)
   var plan: RoutingPlan
-  var consumed = false
   var action: JsonNode
   if languageMode:
     var parsedOk = false
@@ -128,8 +127,11 @@ proc step(command: JsonNode): JsonNode =
       if rejectedAttempts == 1:
         return %*{"kind": "rejected", "reason": "invalid private player reply",
           "observation": currentDecision(retry = true)}
-      plan = dispatcherPlan(baselineInput(privateView))
-      consumed = true
+      endEpisode(game, "fault", "host_error", "invalid private player reply")
+      return %*{"kind": "rejected", "reason": "invalid private player reply",
+        "action": newJNull(),
+        "observation": %*{"kind": "terminal", "reason": "fault",
+          "end_rule": "host_error", "scores": newJNull(), "utilities": newJNull()}}
     action = planJson(plan)
   else:
     action = parseJson(command["response"].getStr())
@@ -160,9 +162,7 @@ proc step(command: JsonNode): JsonNode =
     %*{"kind": "terminal", "scores": scoresBySeat,
       "utilities": utilities}
   else: currentDecision()
-  result = %*{"kind": (if consumed: "consumed_rejection" else: "accepted"),
-    "action": action, "observation": observation}
-  if consumed: result["reason"] = %"invalid private player reply"
+  result = %*{"kind": "accepted", "action": action, "observation": observation}
 
 when isMainModule:
   let args = commandLineParams()

@@ -130,6 +130,8 @@ def main(game_bin, player_bin):
                     "COWORLD_PLAYER_WS_URL": (f"ws://127.0.0.1:{game_port}/player?slot={slot}&token=token-{slot}")
                 }
                 if slot < 2:
+                    player_env["COWORLD_LLM_ENABLED"] = "true"
+                    player_env["COWORLD_LLM_MODEL"] = "fixture/requested"
                     player_env["PLAYER_PROMPT"] = "Route around traffic and meter vans."
                     player_env["COWORLD_LLM_ENDPOINT"] = f"http://127.0.0.1:{model_port}"
                 else:

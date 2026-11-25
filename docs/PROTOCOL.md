@@ -54,9 +54,9 @@ Before HTTP starts, it sends `attempt_started` with the issued `decision_id` and
 `training_attempt`; response fields are null. Finished evidence retains actual body/header bytes,
 status, call identity, sampling metadata, and reader join. Received facts cannot be rewritten.
 A selected model response must match its received native body and parse to the submitted action.
-An absent native endpoint (`no_credentials`, used by offline certification) may send
-`source: "fallback"` with `cause: "no_credentials"`; model parse, transport, or timeout failures
-are rejected and never silently substituted with a scripted move.
+An absent or empty native endpoint or model (`no_credentials`), as well as model parse, transport, or
+timeout failures, are rejected and never substituted with a scripted move or an implicit fallback
+model; the episode terminates unscored with failure evidence.
 
 Each private decision also carries `prompt_config` (`promptVariant`, `promptSeed`)
 and `prompt_selection` (bank, resolved variant, requested selection, and seed).

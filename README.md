@@ -70,8 +70,10 @@ With no policy environment variable, the seat plays `dispatcher`. The game sends
 a private decision, strictly validates its plan (accepting a single bare or fenced JSON object and
 valid defaults for omitted optional fields), and records the resolved stream. Rejected model replies
 receive one retry and then surface an ordinary player failure rather than silently substituting a
-scripted move. An absent native endpoint (`no_credentials`) produces an explicit fallback to
-`dispatcher`, so offline certification still completes.
+scripted move. An absent or empty native endpoint or model (`no_credentials`) also fails the episode
+unscored rather than substituting a scripted move or an implicit fallback model. Release certification
+seats both the native model player (`prompt`) and the scripted baseline (`baseline`); offline tests
+remain explicit and scripted.
 Prompt players use `COWORLD_LLM_ENDPOINT` and `COWORLD_LLM_MODEL`; provider credentials stay in the platform-owned sidecar.
 External players register `kind: "external"` and submit complete plans over the same private decision interface.
 
@@ -124,7 +126,7 @@ Provider traces stay outside public replay and game logs.
 
 `tools/train_bridge.nim MANIFEST VARIANT --language [OPERATOR_PROMPT]` uses the
 ordinary player renderer and parser. Invalid replies receive one exact retry view;
-a second failure consumes the decision with the game's dispatcher fallback.
+a second failure terminates the episode unscored without substituting a scripted move.
 Numeric choices remain a separate training task.
 
 `tools/export_posttrain.nim OUTPUT EPISODES VARIANT GAME_VERSION SOURCE_REVISION` exports complete

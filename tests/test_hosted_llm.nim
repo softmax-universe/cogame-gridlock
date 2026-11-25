@@ -15,6 +15,10 @@ block:
     doAssert body["model"].getStr() == "anthropic/claude-sonnet-4.6"
     doAssert not body.hasKey("anthropic_version")
     doAssert not body.hasKey("output_config")
+  delEnv("COWORLD_LLM_MODEL")
+  let missingModel = newLlmClient(128, "")
+  doAssert missingModel.disabled
+  doAssert missingModel.model.len == 0
   echo "hosted sidecar routing and seat attribution passed"
 
 import std/unittest

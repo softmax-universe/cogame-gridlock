@@ -32,8 +32,8 @@ proc noCredentials(requests: seq[JsonNode], timeoutMs: int):
   for request in requests:
     result.add($ %*{
       "type": "action", "protocol": PlayerProtocol,
-      "decision_id": request["decision_id"], "source": "fallback",
-      "cause": "no_credentials"})
+      "decision_id": request["decision_id"], "source": "llm",
+      "action": newJNull(), "cause": "no_credentials"})
 
 proc snapshots(): array[Seats, SeatSnapshot] =
   for seat in 0 ..< Seats:
@@ -65,24 +65,41 @@ suite "ordinary player decision exchange":
     check decision.attempts[1][1].parsedAction == planJson(decision.plans[1])
     check decision.selectedAttemptIds[1].get() == decision.attempts[1][1].attemptId
 
-  test "explicit missing credentials use the offline certification fallback":
+  test "missing credentials fail unscored without substituting dispatcher":
     let decision = decidePlayers(snapshots(), 0, false, 22.0, noCredentials)
-    check decision.failedSeats.len == 0
-    check decision.plans[0].source == psFallback
-    check decision.plans[1].source == psFallback
+    check decision.failedSeats == @[0, 1]
+    check decision.failureDetail.len > 0
+    check decision.plans[0].source != psFallback
+    check decision.plans[1].source != psFallback
     check decision.fallbacks.len == 2
     check decision.fallbacks[0].cause == fcNoCredentials
     check decision.selectedAttemptIds[0].isNone
     check decision.attempts[0].len == 1
     check not decision.attempts[0][0].accepted
 
-  test "non-no_credentials fallback source and string action shims are rejected":
+  test "fallback source and string action shims are always rejected":
+    let credFallback = $(%*{"type": "action", "protocol": PlayerProtocol,
+      "decision_id": "1", "source": "fallback", "cause": "no_credentials"})
+    let credProposal = playerProposal(credFallback, "1", 0, snapshots()[0])
+    check credProposal.kind == pkRejected
+    check credProposal.cause == fcNoCredentials
     let nonCredFallback = $(%*{"type": "action", "protocol": PlayerProtocol,
       "decision_id": "1", "source": "fallback", "cause": "transport_error"})
     check playerProposal(nonCredFallback, "1", 0, snapshots()[0]).kind == pkRejected
     let stringAction = $(%*{"type": "action", "protocol": PlayerProtocol,
       "decision_id": "1", "source": "llm", "action": "{\"dispatch\":70}"})
     check playerProposal(stringAction, "1", 0, snapshots()[0]).kind == pkRejected
+
+  test "budget guard fails model seats instead of substituting dispatcher":
+    proc unused(requests: seq[JsonNode], timeoutMs: int): seq[string] {.gcsafe.} =
+      doAssert false, "exchange must not be called when guarded"
+    let decision = decidePlayers(snapshots(), 0, true, 22.0, unused)
+    check decision.failedSeats == @[0, 1]
+    check decision.plans[0].source != psFallback
+    check decision.plans[1].source != psFallback
+    check decision.plans[2].source == psScripted
+    check decision.fallbacks.len == 2
+    check decision.fallbacks[0].cause == fcBudgetGuard
 
   test "external origins cannot mint server-owned teacher or human labels":
     for origin in [aoTeacher, aoHuman]:

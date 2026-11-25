@@ -188,25 +188,36 @@ manifest["game"] = collections.OrderedDict([
              "content": {"type": "text", "value": protocol}}]}),
 ])
 
-manifest["player"] = [collections.OrderedDict([
-    ("id", "baseline"),
-    ("type", "player"),
-    ("name", "dispatcher"),
-    ("description",
-     "Congestion-aware shortest-path dispatcher with jam-triggered fleet metering. The bundled "
-     "certification player: it registers as scripted and the game plays it deterministically."),
-    ("image", "{{GRIDLOCK_IMAGE}}"),
-    ("run", ["/bin/gridlock-player"]),
-    ("env", {"PLAYER_SCRIPTED": "dispatcher"}),
-    ("resources", {"requests": {"cpu": "100m", "memory": "64Mi"},
-                   "limits": {"cpu": "1"}}),
-    ("source_url", SRC)]),
+manifest["player"] = [
     collections.OrderedDict([
-        ("id", "prompt"), ("type", "player"), ("name", "prompt dispatcher"),
-        ("description", "Claude prompt policy over the same private view and plan action."),
-        ("image", "{{GRIDLOCK_IMAGE}}"), ("run", ["/bin/gridlock-player"]),
-        ("env", {"PLAYER_PROMPT": "Keep the city moving. Meter vans when queues grow."}),
-        ("source_url", SRC)])]
+        ("id", "prompt"),
+        ("type", "player"),
+        ("name", "prompt dispatcher"),
+        ("description", "Native model prompt policy over the same private view and plan action."),
+        ("image", "{{GRIDLOCK_IMAGE}}"),
+        ("run", ["/bin/gridlock-player"]),
+        ("env", {
+            "COWORLD_LLM_ENABLED": "true",
+            "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5",
+            "PLAYER_PROMPT": "Keep the city moving. Meter vans when queues grow.",
+        }),
+        ("source_url", SRC),
+    ]),
+    collections.OrderedDict([
+        ("id", "baseline"),
+        ("type", "player"),
+        ("name", "dispatcher"),
+        ("description",
+         "Congestion-aware shortest-path dispatcher with jam-triggered fleet metering. The bundled "
+         "scripted baseline: it registers as scripted and the game plays it deterministically."),
+        ("image", "{{GRIDLOCK_IMAGE}}"),
+        ("run", ["/bin/gridlock-player"]),
+        ("env", {"PLAYER_SCRIPTED": "dispatcher"}),
+        ("resources", {"requests": {"cpu": "100m", "memory": "64Mi"},
+                       "limits": {"cpu": "1"}}),
+        ("source_url", SRC),
+    ]),
+]
 
 manifest["variants"] = [
     collections.OrderedDict([
@@ -256,7 +267,7 @@ manifest["certification"] = collections.OrderedDict([
         ("wallClockBudgetSeconds", 180),
         ("playerConnectTimeoutSeconds", 60),
         ("cityPath", "gridcity")])),
-    ("players", [{"player_id": "prompt"}, {"player_id": "prompt"},
+    ("players", [{"player_id": "prompt"}, {"player_id": "baseline"},
                  {"player_id": "baseline"}, {"player_id": "baseline"}]),
 ])
 

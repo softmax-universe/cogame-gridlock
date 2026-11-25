@@ -23,16 +23,32 @@ suite "seat count":
     check manifest["certification"]["players"].len == 4
     check manifest["certification"]["game_config"]["players"].len == 4
 
-  test "every declared player entry occupies at least one certification slot":
-    var seated = initHashSet[string]()
-    for entry in manifest["certification"]["players"]:
-      seated.incl(entry["player_id"].getStr())
-    check manifest["player"].len >= 1
+  test "native model player is first and certification seats every declared player ID":
+    check manifest["player"].len >= 2
+    var declaredIds = initHashSet[string]()
+    var scriptedIds = initHashSet[string]()
     for declared in manifest["player"]:
-      check declared["id"].getStr() in seated
+      let id = declared["id"].getStr()
+      declaredIds.incl(id)
       check declared["type"].getStr() == "player"
       check declared["name"].getStr().len > 0
       check declared["description"].getStr().len > 0
+      if declared.hasKey("env") and declared["env"].hasKey("PLAYER_SCRIPTED"):
+        scriptedIds.incl(id)
+    let first = manifest["player"][0]
+    check first["id"].getStr() == "prompt"
+    check first["run"][0].getStr() == "/bin/gridlock-player"
+    check first["env"]["COWORLD_LLM_ENABLED"].getStr() == "true"
+    check first["env"]["COWORLD_LLM_MODEL"].getStr().len > 0
+    check first["env"]["PLAYER_PROMPT"].getStr().len > 0
+    check not first["env"].hasKey("PLAYER_SCRIPTED")
+    check "baseline" in scriptedIds
+    var seatedIds = initHashSet[string]()
+    for entry in manifest["certification"]["players"]:
+      let id = entry["player_id"].getStr()
+      check id in declaredIds
+      seatedIds.incl(id)
+    check seatedIds == declaredIds
 
   test "SMOKE_SEATS in docker_smoke.sh agrees with the fixture":
     let smoke = readSource("tools/ci/docker_smoke.sh")

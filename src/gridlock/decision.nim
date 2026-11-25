@@ -35,7 +35,7 @@ type
     seq[string] {.gcsafe.}
 
 type
-  ProposalKind* = enum pkAccepted, pkReportedFallback, pkRejected
+  ProposalKind* = enum pkAccepted, pkRejected
   PlayerProposal* = object
     kind*: ProposalKind
     plan*: RoutingPlan
@@ -49,6 +49,7 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
   result.evidence = newDecisionAttempt($seat & "-" & $requestId, "external", aoUnknown)
   result.evidence.response = %raw
   var timedOut = false
+  var noCredentials = false
   try:
     let reply = parseJson(raw)
     if reply.hasKey("training_attempt") and reply["training_attempt"].kind != JNull:
@@ -62,15 +63,9 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
         reply["protocol"].getStr() != PlayerProtocol or
         reply["decision_id"].getStr() != requestId:
       raise newException(GridlockError, "player action envelope mismatch")
-    if reply{"source"}.getStr() == "fallback":
-      if reply{"cause"}.getStr() != "no_credentials":
-        raise newException(GridlockError,
-          "fallback source is only permitted for no_credentials")
-      result.kind = pkReportedFallback
-      result.cause = fcNoCredentials
-      result.detail = "no native model endpoint configured"
-      result.evidence.rejectionReason = some(result.detail)
-      return
+    if reply{"cause"}.getStr() == "no_credentials":
+      noCredentials = true
+      raise newException(GridlockError, "no native model endpoint or model configured")
     if reply{"source"}.getStr() != "llm":
       raise newException(GridlockError, "player action source must be llm")
     let proposed = reply["action"]
@@ -109,7 +104,9 @@ proc playerProposal*(raw: string, requestId: string, seat: int,
   except CatchableError as error:
     result.kind = pkRejected
     result.cause =
-      if timedOut:
+      if noCredentials:
+        fcNoCredentials
+      elif timedOut:
         fcTimeout
       elif result.evidence.origin == aoModel and result.evidence.httpStatus.isSome and
           result.evidence.httpStatus.get() != 200:
@@ -129,15 +126,13 @@ proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
   var pending: seq[int]
   var lastFailure: array[Seats, string]
   for seat in 0 ..< Seats:
-    if seats[seat].scripted != skNone or guarded:
-      let kind =
-        if seats[seat].scripted == skNone: skDispatcher
-        else: seats[seat].scripted
-      result.plans[seat] = scriptedPlan(seats[seat].baseline, kind)
-      if seats[seat].scripted == skNone:
-        result.plans[seat].source = psFallback
-        result.fallbacks.add(PlayerFallback(seat: seat, attempt: 0,
-          cause: fcBudgetGuard, detail: "budget guard engaged"))
+    if seats[seat].scripted != skNone:
+      result.plans[seat] = scriptedPlan(seats[seat].baseline, seats[seat].scripted)
+    elif guarded:
+      result.fallbacks.add(PlayerFallback(seat: seat, attempt: 0,
+        cause: fcBudgetGuard, detail: "budget guard engaged"))
+      lastFailure[seat] = "budget guard engaged"
+      result.failedSeats.add(seat)
     else:
       pending.add(seat)
 
@@ -188,11 +183,6 @@ proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
         result.plans[seat] = proposal.plan
         result.plans[seat].latencyMs = latencyMs
         result.selectedAttemptIds[seat] = some(proposal.evidence.attemptId)
-      of pkReportedFallback:
-        result.fallbacks.add(PlayerFallback(seat: seat, attempt: attempt,
-          cause: proposal.cause, detail: proposal.detail))
-        result.plans[seat] = dispatcherPlan(seats[seat].baseline)
-        result.plans[seat].source = psFallback
       of pkRejected:
         let detail =
           if proposal.detail.len > 0: proposal.detail
@@ -200,13 +190,17 @@ proc decidePlayers*(seats: array[Seats, SeatSnapshot], turn: int,
         result.fallbacks.add(PlayerFallback(seat: seat, attempt: attempt,
           cause: proposal.cause, detail: detail))
         lastFailure[seat] = detail
-        retry.add(seat)
+        if proposal.cause == fcNoCredentials:
+          result.failedSeats.add(seat)
+        else:
+          retry.add(seat)
     pending = retry
 
   for seat in pending:
     result.failedSeats.add(seat)
-    if result.failureDetail.len == 0:
-      let detail =
-        if lastFailure[seat].len > 0: lastFailure[seat]
-        else: "player failed to supply a valid routing plan"
-      result.failureDetail = "seat " & $seat & " failed on turn " & $turn & ": " & detail
+  if result.failedSeats.len > 0 and result.failureDetail.len == 0:
+    let seat = result.failedSeats[0]
+    let detail =
+      if lastFailure[seat].len > 0: lastFailure[seat]
+      else: "player failed to supply a valid routing plan"
+    result.failureDetail = "seat " & $seat & " failed on turn " & $turn & ": " & detail

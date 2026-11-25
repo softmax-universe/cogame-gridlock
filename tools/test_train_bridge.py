@@ -30,15 +30,17 @@ def play(variant: str, teacher: bool, language: bool) -> None:
         if language:
             assert observation["inference_mode"] == "text_action"
             original = observation
-            fallback = json.loads(request({"kind": "teacher"})["response"])
             rejected = request({"kind": "step", "decision_id": 0, "response": "invalid"})
             assert rejected["kind"] == "rejected"
             assert rejected["observation"]["decision_id"] == 0
             assert rejected["observation"]["messages"][1]["content"].startswith(original["messages"][1]["content"])
             assert "previous reply" in rejected["observation"]["messages"][1]["content"]
-            consumed = request({"kind": "step", "decision_id": 0, "response": "invalid"})
-            assert consumed["kind"] == "consumed_rejection" and consumed["observation"]["decision_id"] == 1
-            assert consumed["action"] == fallback
+            terminal = request({"kind": "step", "decision_id": 0, "response": "invalid"})
+            assert terminal["kind"] == "rejected"
+            assert terminal["action"] is None
+            assert terminal["observation"]["kind"] == "terminal"
+            assert terminal["observation"]["scores"] is None
+            assert terminal["observation"]["utilities"] is None
             observation = request({"kind": "reset", "seed": f"gridlock-{variant}-{teacher}", "players": 4})
         else:
             assert observation["inference_mode"] is None
